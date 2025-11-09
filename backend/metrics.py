@@ -22,7 +22,14 @@ rule_eval_ms = Histogram(
 signals_counter = Counter(
     "mpx_signals_total",
     "Signals emitted",
-    labelnames=("rule",),
+    labelnames=("rule", "source"),
+    registry=REGISTRY,
+)
+
+ml_inference_ms = Histogram(
+    "mpx_ml_inference_ms",
+    "ML inference latency",
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000),
     registry=REGISTRY,
 )
 

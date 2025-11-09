@@ -1,0 +1,7 @@
+ALTER TABLE signal
+    ADD COLUMN IF NOT EXISTS source VARCHAR(10) DEFAULT 'rule',
+    ADD COLUMN IF NOT EXISTS confidence NUMERIC(10,6),
+    ADD COLUMN IF NOT EXISTS ml_features JSONB,
+    ADD COLUMN IF NOT EXISTS reason TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_signal_source ON signal(source);

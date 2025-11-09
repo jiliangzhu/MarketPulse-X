@@ -10,6 +10,9 @@ interface Signal {
   edge_score?: number;
   payload_json?: Record<string, unknown>;
   created_at: string;
+  source?: string;
+  confidence?: number;
+  reason?: string;
 }
 
 const levels = ["all", "P1", "P2", "P3"] as const;
@@ -135,10 +138,16 @@ export default function SignalList() {
             <small>{new Date(signal.created_at).toLocaleTimeString()}</small>
           </div>
           <div>
-            <div>Market: {signal.market_id}</div>
+            <div>
+              Market: {signal.market_id} / {signal.source?.toUpperCase() ?? "RULE"}
+            </div>
             <div>Score: {signal.score ?? "-"}</div>
             <div>Edge: {renderEdge(signal)}</div>
+            {signal.confidence !== undefined && (
+              <div>Confidence: {(signal.confidence * 100).toFixed(0)}%</div>
+            )}
             <div>Rule: {renderRule(signal)}</div>
+            <div>Reason: {signal.reason ?? "N/A"}</div>
           </div>
           <button onClick={() => setActiveSignal(signal.signal_id)}>下单</button>
         </div>

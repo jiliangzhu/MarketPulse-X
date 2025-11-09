@@ -6,6 +6,15 @@ from typing import Any, AsyncIterator, Callable, Coroutine, Optional
 
 import asyncpg
 
+try:  # pragma: no cover - optional dependency
+    from pgvector.asyncpg import register_vector
+    VECTOR_SUPPORTED = True
+except Exception:  # pragma: no cover - fallback
+    VECTOR_SUPPORTED = False
+
+    async def register_vector(_conn):  # type: ignore
+        return None
+
 
 class Database:
     def __init__(self, dsn: str):
@@ -14,7 +23,12 @@ class Database:
 
     async def connect(self) -> None:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=10)
+            self._pool = await asyncpg.create_pool(
+                dsn=self._dsn,
+                min_size=1,
+                max_size=10,
+                init=self._init_connection,
+            )
 
     async def disconnect(self) -> None:
         if self._pool:
@@ -50,6 +64,9 @@ class Database:
         async with self.connection() as conn:
             async with conn.transaction():
                 return await func(conn)
+
+    async def _init_connection(self, conn: asyncpg.Connection) -> None:
+        await register_vector(conn)
 
 
 async def run_sync(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

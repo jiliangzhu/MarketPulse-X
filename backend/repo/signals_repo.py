@@ -32,11 +32,12 @@ async def upsert_rule_def(db: Database, rule: dict[str, Any]) -> int:
 
 async def insert_signal(db: Database, signal: dict[str, Any]) -> int:
     query = """
-        INSERT INTO signal (market_id, option_id, rule_id, level, score, payload_json, edge_score)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        INSERT INTO signal (market_id, option_id, rule_id, level, score, payload_json, edge_score, source, confidence, ml_features, reason)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         RETURNING signal_id
     """
     payload = _json_dump(signal.get("payload_json"))
+    features_json = _json_dump(signal.get("ml_features"))
     row = await db.fetchrow(
         query,
         signal.get("market_id"),
@@ -46,6 +47,10 @@ async def insert_signal(db: Database, signal: dict[str, Any]) -> int:
         signal.get("score"),
         payload,
         signal.get("edge_score"),
+        signal.get("source", "rule"),
+        signal.get("confidence"),
+        features_json,
+        signal.get("reason"),
     )
     return int(row["signal_id"])
 
@@ -58,7 +63,7 @@ async def fetch_signals(
     limit: int = 100,
     offset: int = 0,
 ) -> List[dict[str, Any]]:
-    query = "SELECT signal_id, market_id, option_id, level, score, payload_json, edge_score, created_at FROM signal"
+    query = "SELECT signal_id, market_id, option_id, level, score, payload_json, edge_score, created_at, source, confidence, ml_features, reason FROM signal"
     clauses: list[str] = []
     params: list[Any] = []
     if level:
@@ -79,6 +84,7 @@ async def fetch_signals(
     for row in rows:
         data = dict(row)
         data["payload_json"] = _json_load(data.get("payload_json"))
+        data["ml_features"] = _json_load(data.get("ml_features"))
         result.append(data)
     return result
 
@@ -102,7 +108,7 @@ async def insert_audit(
 async def get_signal(db: Database, signal_id: int) -> dict[str, Any] | None:
     row = await db.fetchrow(
         """
-        SELECT signal_id, market_id, option_id, level, score, payload_json, edge_score, created_at
+        SELECT signal_id, market_id, option_id, level, score, payload_json, edge_score, created_at, source, confidence, ml_features, reason
         FROM signal
         WHERE signal_id = $1
         """,
@@ -112,6 +118,7 @@ async def get_signal(db: Database, signal_id: int) -> dict[str, Any] | None:
         return None
     data = dict(row)
     data["payload_json"] = _json_load(data.get("payload_json"))
+    data["ml_features"] = _json_load(data.get("ml_features"))
     return data
 
 def _json_dump(value: Any) -> str:

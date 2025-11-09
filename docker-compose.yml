@@ -10,7 +10,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - /Volumes/lexar/docker/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-mpx}"]
       interval: 10s
@@ -27,6 +27,7 @@ services:
       - .env
     environment:
       SERVICE_ROLE: ${SERVICE_ROLE:-api}
+      PYTHONPATH: ${PYTHONPATH:-/app/vendor}
     ports:
       - "${API_PORT:-8080}:8080"
     volumes:
@@ -43,6 +44,7 @@ services:
       - .env
     environment:
       SERVICE_ROLE: ingestor
+      PYTHONPATH: ${PYTHONPATH:-/app/vendor}
     volumes:
       - ./:/app
     command: ["python", "-m", "backend.workers.ingestor"]
@@ -57,6 +59,7 @@ services:
       - .env
     environment:
       SERVICE_ROLE: worker
+      PYTHONPATH: ${PYTHONPATH:-/app/vendor}
     volumes:
       - ./:/app
     command: ["python", "-m", "backend.workers.rules_worker"]
@@ -82,5 +85,4 @@ services:
     depends_on:
       - postgres
 
-volumes:
-  pgdata:
+volumes: {}

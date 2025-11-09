@@ -58,6 +58,15 @@ class RulesEngine:
         self._cooldowns: dict[tuple[int, str], datetime] = {}
         self.synonym_matcher = SynonymMatcher(settings.config_synonyms_path)
         self.circuit_breaker = CircuitBreaker()
+        self.ml_model: Optional[MLModel] = None
+        self.ml_interval = settings.ml_inference_interval_secs
+        self.last_ml_run = 0.0
+        if self.settings.ml_enabled:
+            try:
+                self.ml_model = MLModel(self.settings.ml_model_path)
+            except Exception as exc:  # pragma: no cover - fallback logging
+                self.logger.error("ml-model-load-failed", extra={"error": str(exc)})
+                self.ml_model = None
 
     async def load_rules(self) -> None:
         self.rules.clear()
@@ -95,23 +104,34 @@ class RulesEngine:
         markets = await markets_repo.list_markets(self.db, status="active", limit=100)
         snapshots: dict[str, dict[str, Any]] = {}
         group_rules = [rule for rule in self.rules if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}]
+        rule_signals: list[tuple[Optional[Rule], str, dict[str, Any]]] = []
         for market in markets:
             market_id = market["market_id"]
             ticks = await ticks_repo.latest_ticks_by_market(self.db, market_id)
             recent = await ticks_repo.recent_ticks(self.db, market_id, minutes=5, limit=250)
             options = await markets_repo.list_options(self.db, market_id)
+            synonym_ids = await markets_repo.synonym_peers(self.db, market_id)
+            peer_entries: list[dict[str, Any]] = []
+            for peer_id in synonym_ids:
+                peer_ticks = snapshots.get(peer_id, {}).get("ticks")
+                if not peer_ticks:
+                    peer_ticks = await ticks_repo.latest_ticks_by_market(self.db, peer_id)
+                if peer_ticks:
+                    top_peer = max(peer_ticks.values(), key=lambda t: _to_float(t.get("price")))
+                    peer_entries.append({"market_id": peer_id, "price": _to_float(top_peer.get("price"))})
             snapshots[market_id] = {
                 "market": market,
                 "ticks": ticks,
                 "recent": recent,
                 "options": options,
+                "synonym_peers": peer_entries,
             }
             for rule in self.rules:
                 if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}:
                     continue
                 signal_payload = await self._evaluate_rule(rule, market, ticks, recent, options)
                 if signal_payload:
-                    await self._emit_signal(rule, market_id, signal_payload)
+                    rule_signals.append((rule, market_id, signal_payload))
         if group_rules:
             groups = await self.synonym_matcher.build_groups(self.db)
             for rule in group_rules:
@@ -120,59 +140,111 @@ class RulesEngine:
                 else:
                     payloads = self._rule_cross_market(rule, groups, snapshots)
                 for market_id, payload in payloads:
-                    await self._emit_signal(rule, market_id, payload)
+                    rule_signals.append((rule, market_id, payload))
+
+        ml_signals: list[dict[str, Any]] = []
+        if self.ml_model and (time.time() - self.last_ml_run >= self.ml_interval):
+            self.last_ml_run = time.time()
+            feature_rows: list[dict[str, Any]] = []
+            market_refs: list[str] = []
+            for market_id, snapshot in snapshots.items():
+                features = extract_features_realtime(
+                    snapshot["market"],
+                    snapshot["ticks"],
+                    snapshot["recent"],
+                    snapshot.get("synonym_peers"),
+                )
+                if features:
+                    feature_rows.append(features)
+                    market_refs.append(market_id)
+            if feature_rows:
+                features_df = pd.DataFrame(feature_rows).fillna(0)
+                infer_start = time.perf_counter()
+                probabilities = self.ml_model.predict_proba_batch(features_df)
+                ml_inference_ms.observe((time.perf_counter() - infer_start) * 1000)
+                for market_id, features, probability in zip(market_refs, feature_rows, probabilities):
+                    if probability >= self.settings.ml_confidence_threshold:
+                        ml_signals.append(
+                            {
+                                "market_id": market_id,
+                                "confidence": probability,
+                                "ml_features": features,
+                                "reason": f"ML confidence {probability*100:.1f}%",
+                            }
+                        )
+
+        fused_signals = self._fuse_signals(rule_signals, ml_signals)
+        for fused_payload in fused_signals:
+            rule = fused_payload.pop("rule", None)
+            market_id = fused_payload.pop("market_id")
+            await self._emit_signal(rule, market_id, fused_payload)
+
         self.last_run = datetime.now(timezone.utc)
         if app_state is not None:
             app_state.rules_last_run = self.last_run
         rule_eval_ms.observe((time.perf_counter() - start) * 1000)
 
-    async def _emit_signal(self, rule: Rule, market_id: str, signal_payload: dict[str, Any]) -> None:
-        if self.circuit_breaker.is_open(rule.name, market_id):
+    async def _emit_signal(self, rule: Optional[Rule], market_id: str, signal_payload: dict[str, Any]) -> None:
+        rule_name = rule.name if rule else signal_payload.get("source", "ML")
+        if self.circuit_breaker.is_open(rule_name, market_id):
             return
-        cooldown_conf = rule.config.get("dedupe", {})
+        cooldown_conf = rule.config.get("dedupe", {}) if rule else {}
         cooldown_secs = cooldown_conf.get("cooldown_secs", 300)
-        dedupe_key = (rule.rule_id, market_id)
+        dedupe_key = (rule.rule_id if rule else -1, market_id)
         now = datetime.now(timezone.utc)
         last_fire = self._cooldowns.get(dedupe_key)
         if last_fire and (now - last_fire).total_seconds() < cooldown_secs:
             return
         self._cooldowns[dedupe_key] = now
         payload_json = signal_payload.get("payload") or {}
-        payload_json["rule_name"] = rule.name
-        payload_json["rule_id"] = rule.rule_id
-        payload_json["rule_type"] = rule.type
+        if rule:
+            payload_json["rule_name"] = rule.name
+            payload_json["rule_id"] = rule.rule_id
+            payload_json["rule_type"] = rule.type
+        else:
+            payload_json["rule_name"] = signal_payload.get("source", "ML")
+            payload_json["rule_type"] = "ML"
         edge_score = signal_payload.get("edge_score")
         if edge_score is not None:
             payload_json["edge_score"] = edge_score
         transport_hint = "telegram"
         status = await self.notifier.send_message(
             signal_payload["message"],
-            dedupe_key=f"{rule.rule_id}:{market_id}",
+            dedupe_key=f"{rule.rule_id if rule else 'ml'}:{market_id}",
             cooldown_secs=cooldown_secs,
         )
         if status != "sent":
             transport_hint = "telegram-dry-run"
-            self.circuit_breaker.record_failure(rule.name, market_id)
+            self.circuit_breaker.record_failure(rule_name, market_id)
         else:
-            self.circuit_breaker.reset(rule.name, market_id)
+            self.circuit_breaker.reset(rule_name, market_id)
         payload_json["transport"] = transport_hint
-        score = signal_payload["score"]
-        level = rule.config.get("outputs", {}).get("level", "P2")
+        score = signal_payload.get("score")
+        if score is None:
+            score = edge_score
+        level = signal_payload.get("level")
+        if level is None and rule:
+            level = rule.config.get("outputs", {}).get("level", "P2")
+        level = level or "P2"
         signal_id = await signals_repo.insert_signal(
             self.db,
             {
                 "market_id": market_id,
                 "option_id": signal_payload.get("option_id"),
-                "rule_id": rule.rule_id,
+                "rule_id": rule.rule_id if rule else None,
                 "level": level,
                 "score": score,
                 "payload_json": payload_json,
                 "edge_score": edge_score,
+                "source": signal_payload.get("source", "rule"),
+                "confidence": signal_payload.get("confidence"),
+                "ml_features": signal_payload.get("ml_features"),
+                "reason": signal_payload.get("reason"),
             },
         )
         await kpi_repo.record_kpi(
             self.db,
-            rule_type=rule.type,
+            rule_type=rule.type if rule else "ML",
             level=level,
             gap=payload_json.get("gap"),
             est_edge_bps=payload_json.get("estimated_edge_bps"),
@@ -182,9 +254,11 @@ class RulesEngine:
             actor="rules_engine",
             action="signal_emitted",
             target_id=str(signal_id),
-            meta_json={"rule": rule.name, "market_id": market_id},
+            meta_json={"rule": rule.name if rule else "ML", "market_id": market_id},
         )
-        signals_counter.labels(rule=rule.type).inc()
+        rule_type = rule.type if rule else "ML"
+        source = signal_payload.get("source", "rule")
+        signals_counter.labels(rule=rule_type, source=source).inc()
 
     async def _evaluate_rule(
         self,
@@ -209,6 +283,60 @@ class RulesEngine:
         if rule.type == "CROSS_MARKET_MISPRICE":
             return None
         return None
+
+    def _fuse_signals(
+        self,
+        rule_signals: list[tuple[Optional[Rule], str, dict[str, Any]]],
+        ml_signals: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        fused: list[dict[str, Any]] = []
+        rule_map: dict[str, tuple[Optional[Rule], dict[str, Any]]] = {}
+        for rule, market_id, payload in rule_signals:
+            existing = rule_map.get(market_id)
+            if not existing or (payload.get("score", 0) or 0) > (existing[1].get("score", 0) or 0):
+                rule_map[market_id] = (rule, payload)
+        ml_map: dict[str, dict[str, Any]] = {entry["market_id"]: entry for entry in ml_signals}
+        all_markets = set(rule_map.keys()) | set(ml_map.keys())
+        for market_id in all_markets:
+            rule_entry = rule_map.get(market_id)
+            ml_entry = ml_map.get(market_id)
+            reason_parts: list[str] = []
+            edge = 0.0
+            source_label = "rule"
+            confidence = None
+            ml_features = None
+            rule_obj: Optional[Rule] = None
+            if ml_entry:
+                confidence = ml_entry.get("confidence")
+                ml_features = ml_entry.get("ml_features")
+                if confidence is not None:
+                    edge += confidence * 100 * self.settings.ml_fusion_confidence_weight
+                    reason_parts.append(ml_entry.get("reason", "ML confidence spike"))
+                source_label = "ml"
+            if rule_entry:
+                rule_obj, payload = rule_entry
+                edge += self.settings.ml_fusion_rule_bonus
+                reason_parts.append(payload.get("message", payload.get("reason", "Rule signal")))
+                fused_payload = payload.copy()
+                if ml_entry:
+                    source_label = "hybrid"
+            else:
+                fused_payload = {
+                    "message": ml_entry.get("reason", "ML signal") if ml_entry else "Hybrid signal",
+                    "score": edge,
+                    "payload": {},
+                    "level": "P2",
+                }
+            fused_payload["edge_score"] = edge
+            fused_payload["score"] = fused_payload.get("score", edge)
+            fused_payload["source"] = source_label
+            fused_payload["confidence"] = confidence
+            fused_payload["ml_features"] = ml_features
+            fused_payload["reason"] = "; ".join(reason_parts) if reason_parts else fused_payload.get("reason")
+            fused_payload["market_id"] = market_id
+            fused_payload["rule"] = rule_obj
+            fused.append(fused_payload)
+        return fused
 
     def _rule_sum_lt_1(
         self,

@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     exec_max_daily_notional: float = 1000.0
     exec_slippage_bps: int = 80
 
+    # ML Model Inference Settings
+    ml_enabled: bool = False
+    ml_model_path: Path = Path("models/lgbm_v1.pkl")
+    ml_confidence_threshold: float = 0.7
+    ml_inference_interval_secs: float = 5.0
+    ml_fusion_confidence_weight: float = 1.0
+    ml_fusion_rule_bonus: float = 20.0
+
     config_app_path: Path = Path("configs/app.yaml")
     config_rules_path: Path = Path("configs/rules")
     config_synonyms_path: Path = Path("configs/synonyms.yml")

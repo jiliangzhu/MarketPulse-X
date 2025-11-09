@@ -44,6 +44,10 @@ class SignalSchema(BaseModel):
     edge_score: Optional[float] = None
     payload_json: Optional[dict] = None
     created_at: datetime
+    source: str = "rule"
+    confidence: Optional[float] = None
+    ml_features: Optional[dict] = None
+    reason: Optional[str] = None
 
 
 class RuleUploadSchema(BaseModel):
