@@ -1,0 +1,13 @@
+groups:
+  - name: "US Election Cluster"
+    method: keyword
+    keywords: ["election", "总统", "candidate"]
+    explicit: ["mock-election"]
+  - name: "Fed Rate Moves"
+    method: keyword
+    keywords: ["fed", "rate", "加息"]
+    explicit: ["mock-fed"]
+  - name: "Final Sweep"
+    method: keyword
+    keywords: ["final", "sweep"]
+    explicit: ["mock-endgame"]

@@ -1,0 +1,16 @@
+type: ENDGAME_SWEEP
+name: "Endgame >$0.95 && <X min to close"
+enabled: true
+params:
+  min_price: 0.95
+  minutes_to_end: 30
+  vol_surge_z: 1.8
+  min_liquidity: 500.0
+outputs:
+  level: "P2"
+  score:
+    base: 60
+    weights:
+      time_to_end: 0.5
+      liquidity: 0.3
+      vol_surge: 0.2

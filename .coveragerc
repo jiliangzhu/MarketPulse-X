@@ -1,0 +1,8 @@
+[run]
+omit = 
+    backend/app.py
+    backend/service.py
+    backend/workers/*
+    backend/scripts/*
+    backend/ingestion/source_real.py
+    backend/models.py

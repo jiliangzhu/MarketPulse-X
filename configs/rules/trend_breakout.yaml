@@ -1,0 +1,16 @@
+type: TREND_BREAKOUT
+name: "Trend breakout >2%/5m"
+enabled: true
+params:
+  lookback_secs: 300
+  pct_breakout: 0.02
+  min_points: 4
+  min_liquidity: 200.0
+outputs:
+  level: "P2"
+  score:
+    base: 55
+    weights:
+      velocity: 0.4
+      time_to_end: 0.3
+      liquidity: 0.3

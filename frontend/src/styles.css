@@ -1,0 +1,160 @@
+:root {
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: #0f172a;
+  color: #e2e8f0;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  background: #1e293b;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid #334155;
+}
+
+header h1 {
+  margin: 0;
+  color: #38bdf8;
+}
+
+main {
+  flex: 1;
+  padding: 1rem 2rem;
+}
+
+.card {
+  background: #1e293b;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid #334155;
+  margin-bottom: 1rem;
+}
+
+.flex {
+  display: flex;
+  gap: 1rem;
+}
+
+.column {
+  flex: 1;
+}
+
+.list-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #334155;
+}
+
+.signal-level-P1 {
+  color: #f87171;
+}
+
+.signal-level-P2 {
+  color: #facc15;
+}
+
+.signal-level-P3 {
+  color: #34d399;
+}
+
+.badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  background: #0ea5e9;
+  color: #0f172a;
+  font-weight: bold;
+}
+
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-card {
+  background: #1e293b;
+  padding: 1.5rem;
+  border-radius: 12px;
+  width: 420px;
+  border: 1px solid #334155;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.modal-detail {
+  max-height: 160px;
+  overflow: auto;
+  background: #0f172a;
+  padding: 0.5rem;
+  border-radius: 8px;
+}
+
+.modal-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+  color: #cbd5f5;
+  margin: 0.5rem 0;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+}
+
+.kpi-item {
+  background: #0f172a;
+  padding: 0.75rem;
+  border-radius: 10px;
+  border: 1px solid #1f2937;
+}
+
+.rb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+code {
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  padding: 0.05rem 0.25rem;
+  border-radius: 6px;
+}
+
+.risk-summary {
+  border-left: 4px solid #22d3ee;
+  padding-left: 0.75rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.pagination {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+}

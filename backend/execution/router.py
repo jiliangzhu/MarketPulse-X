@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from backend.db import Database
+from backend.deps import get_app_settings, get_db
+from backend.execution import oems
+from backend.execution.executor import Executor
+from backend.repo import markets_repo, signals_repo, ticks_repo
+from backend.settings import Settings
+from backend.utils.logging import get_logger
+
+router = APIRouter(prefix="/api/execution", tags=["execution"])
+logger = get_logger("execution_router")
+
+
+class IntentRequest(BaseModel):
+    signal_id: int
+    side: Optional[str] = None
+    qty_override: Optional[float] = None
+    limit_price_override: Optional[float] = None
+    ttl_secs: int = 60
+
+
+class IntentConfirmResponse(BaseModel):
+    intent_id: int
+    status: str
+    detail_json: dict | None = None
+
+
+async def _signal_payload(db: Database, signal_id: int) -> dict:
+    row = await signals_repo.get_signal(db, signal_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="signal not found")
+    return row
+
+
+@router.post("/intent", response_model=IntentConfirmResponse)
+async def create_intent(
+    payload: IntentRequest,
+    db: Database = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+):
+    request_payload = payload
+    signal = await _signal_payload(db, request_payload.signal_id)
+    if signal.get("level") not in {"P1", "P2"}:
+        raise HTTPException(status_code=400, detail="signal level too low")
+    market_id = signal["market_id"]
+    latest = await ticks_repo.latest_ticks_by_market(db, market_id)
+    if not latest:
+        raise HTTPException(status_code=400, detail="market has no liquidity")
+    top_tick = max(latest.values(), key=lambda x: x.get("price") or 0)
+    rule_type = (signal.get("payload_json") or {}).get("rule_type")
+    qty = request_payload.qty_override or 1
+    ref_price = float(top_tick.get("price") or 0.5)
+    limit_price = request_payload.limit_price_override or ref_price
+    side = request_payload.side or ("buy" if signal.get("level") == "P1" else "sell")
+    # 根据风控滑点对价格做预夹
+    allowed_slip = ref_price * (settings.exec_slippage_bps / 10000)
+    if rule_type == "SUM_LT_1":
+        qty = request_payload.qty_override or max(len(latest), 1)
+        total_price = float((signal.get("payload_json") or {}).get("total_price") or ref_price)
+        avg_leg_price = total_price / max(len(latest), 1)
+        # 用平均腿价，但不超过滑点上限
+        candidate = min(0.99, avg_leg_price)
+        limit_price = request_payload.limit_price_override or candidate
+        side = "buy"
+    elif rule_type == "ENDGAME_SWEEP":
+        qty = request_payload.qty_override or 1
+        limit_price = request_payload.limit_price_override or min(0.99, ref_price)
+        side = "buy"
+    # 最终根据滑点做钳制，避免确认阶段被 guardrail 拒绝
+    if side == "buy":
+        limit_price = min(limit_price, ref_price + allowed_slip)
+    else:
+        limit_price = max(limit_price, ref_price - allowed_slip)
+    policy_id = await oems.bootstrap_policy(db, settings)
+    signal_payload = signal.get("payload_json") or {}
+    detail_json = {
+        "signal_level": signal.get("level"),
+        "rule": signal_payload.get("rule_name"),
+        "rule_type": signal_payload.get("rule_type"),
+        "transport": signal_payload.get("transport"),
+        "edge_score": signal_payload.get("edge_score"),
+        "estimated_edge_bps": signal_payload.get("estimated_edge_bps"),
+        "payload": signal_payload,
+    }
+    intent = await oems.create_suggested_intent(
+        db,
+        {
+            "signal_id": request_payload.signal_id,
+            "market_id": market_id,
+            "side": side,
+            "qty": qty,
+            "limit_price": limit_price,
+            "ttl_secs": request_payload.ttl_secs,
+            "status": "suggested",
+            "policy_id": policy_id,
+            "detail_json": detail_json,
+        },
+    )
+    return IntentConfirmResponse(intent_id=intent["intent_id"], status=intent["status"], detail_json=detail_json)
+
+
+@router.post("/confirm/{intent_id}", response_model=IntentConfirmResponse)
+async def confirm_intent(
+    intent_id: int,
+    db: Database = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+):
+    intents = await oems.list_intents(db)
+    target = next((intent for intent in intents if intent["intent_id"] == intent_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="intent not found")
+    executor = Executor(db, settings)
+    result = await executor.confirm_and_execute(target)
+    await oems.mark_status(db, intent_id, result["status"], result.get("detail_json"))
+    return IntentConfirmResponse(intent_id=intent_id, status=result["status"], detail_json=result.get("detail_json"))
+
+
+class IntentListResponse(BaseModel):
+    items: list[dict]
+
+
+@router.get("/intents", response_model=IntentListResponse)
+async def list_intents(
+    status: Optional[str] = Query(default=None),
+    db: Database = Depends(get_db),
+):
+    intents = await oems.list_intents(db, status=status)
+    return IntentListResponse(items=intents)

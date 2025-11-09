@@ -1,0 +1,18 @@
+type: SPIKE_DETECT
+name: "Price Spike > 3% in 10s"
+enabled: true
+params:
+  window_secs: 10
+  pct_change_gt: 0.03
+  min_liquidity: 200.0
+noise_filter:
+  ema_window: 5
+  zscore_gt: 2.0
+outputs:
+  level: "P2"
+  score:
+    base: 50
+    weights:
+      velocity: 0.4
+      liquidity: 0.3
+      spread: 0.3

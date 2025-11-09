@@ -1,0 +1,16 @@
+type: CROSS_MARKET_MISPRICE
+name: "Cross-market mispricing > 5%"
+enabled: true
+params:
+  group_min_size: 2
+  price_diff_threshold: 0.05
+  min_liquidity: 300.0
+  target_label: "yes"
+outputs:
+  level: "P1"
+  score:
+    base: 70
+    weights:
+      gap: 0.5
+      liquidity: 0.2
+      time_to_end: 0.3

@@ -1,0 +1,14 @@
+type: DUTCH_BOOK_DETECT
+name: "Dutch book sum < 0.995"
+enabled: true
+params:
+  sum_price_lt: 0.995
+  min_liquidity: 400.0
+outputs:
+  level: "P1"
+  score:
+    base: 75
+    weights:
+      liquidity: 0.3
+      edge: 0.6
+      spread: 0.1

@@ -1,0 +1,86 @@
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.15.2-pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mpx}
+      POSTGRES_USER: ${POSTGRES_USER:-mpx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mpx_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-mpx}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      SERVICE_ROLE: ${SERVICE_ROLE:-api}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - ./:/app
+    command: ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port 8080"]
+
+  ingestor:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      SERVICE_ROLE: ingestor
+    volumes:
+      - ./:/app
+    command: ["python", "-m", "backend.workers.ingestor"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      SERVICE_ROLE: worker
+    volumes:
+      - ./:/app
+    command: ["python", "-m", "backend.workers.rules_worker"]
+
+  frontend:
+    build:
+      context: ./frontend
+    env_file:
+      - .env
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/usr/src/app
+    command: ["sh", "-c", "npm install && npm run dev -- --host 0.0.0.0 --port 5173"]
+
+  adminer:
+    image: adminer:4
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:

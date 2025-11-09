@@ -1,0 +1,2 @@
+ALTER TABLE signal
+    ADD COLUMN IF NOT EXISTS edge_score NUMERIC(12,6);

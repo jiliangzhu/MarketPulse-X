@@ -1,0 +1,13 @@
+app:
+  name: MarketPulse-X
+  data_source: ${DATA_SOURCE:-mock}
+  ingestion_interval_secs: 1
+  rules_interval_secs: 2
+  signal_retention_minutes: 60
+  window_minutes: 5
+  price_sparkline_points: 30
+scheduler:
+  max_concurrency: 4
+  backoff_secs: 3
+telemetry:
+  enable_metrics: true
