@@ -64,22 +64,34 @@ async def get_market_detail(
     latest = await ticks_repo.latest_ticks_by_market(db, market_id)
     sparkline = await ticks_repo.recent_ticks(db, market_id, minutes=5, limit=200)
     synonyms = await markets_repo.synonym_peers(db, market_id)
-    option_map = {
-        opt["option_id"]: MarketOptionSchema(
-            option_id=opt["option_id"],
+    # Build candidates per label and pick the best (prefer real token_ids over synthetic "<market>-0/1" and newer ts)
+    by_label: dict[str, list[MarketOptionSchema]] = {}
+    for opt in options_meta:
+        oid = opt["option_id"]
+        schema = MarketOptionSchema(
+            option_id=oid,
             label=opt["label"],
-            last_price=latest.get(opt["option_id"], {}).get("price"),
-            last_ts=latest.get(opt["option_id"], {}).get("ts"),
+            last_price=latest.get(oid, {}).get("price"),
+            last_ts=latest.get(oid, {}).get("ts"),
         )
-        for opt in options_meta
-    }
+        by_label.setdefault(opt["label"], []).append(schema)
+
+    def pick_best(items: list[MarketOptionSchema]) -> MarketOptionSchema:
+        def score(x: MarketOptionSchema) -> tuple[int, float]:
+            synthetic = 1 if ("-" in (x.option_id or "")) else 0  # real token_ids have no '-'
+            ts = x.last_ts.timestamp() if x.last_ts else 0.0
+            return (-synthetic, ts)
+
+        return sorted(items, key=score, reverse=True)[0]
+
+    options = [pick_best(items) for items in by_label.values()]
     return MarketDetailSchema(
         market_id=market_id,
         title=market["title"],
         status=market["status"],
         ends_at=market.get("ends_at"),
         tags=market.get("tags") or [],
-        options=list(option_map.values()),
+        options=options,
         sparkline=sparkline,
         synonyms=synonyms,
     )

@@ -158,3 +158,16 @@ code {
   align-items: center;
   gap: 0.5rem;
 }
+
+.modal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.modal-table th,
+.modal-table td {
+  border-bottom: 1px solid #334155;
+  padding: 0.25rem;
+  text-align: left;
+}

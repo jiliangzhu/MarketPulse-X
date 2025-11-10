@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { fetchSignals } from "../api";
+import type { BookRow, SuggestedTrade } from "../types";
 import ExecutionModal from "./ExecutionModal";
+
+interface SignalPayload extends Record<string, unknown> {
+  edge_score?: number;
+  rule_type?: string;
+  suggested_trade?: SuggestedTrade;
+  book_snapshot?: BookRow[];
+}
 
 interface Signal {
   signal_id: number;
@@ -8,7 +16,7 @@ interface Signal {
   level: string;
   score?: number;
   edge_score?: number;
-  payload_json?: Record<string, unknown>;
+  payload_json?: SignalPayload;
   created_at: string;
   source?: string;
   confidence?: number;
@@ -84,7 +92,7 @@ export default function SignalList() {
   };
 
   const renderEdge = (signal: Signal) => {
-    const payloadEdge = signal.payload_json?.edge_score as number | undefined;
+    const payloadEdge = signal.payload_json?.edge_score;
     const value = signal.edge_score ?? payloadEdge;
     if (value === undefined || Number.isNaN(value)) {
       return "-";
@@ -93,8 +101,46 @@ export default function SignalList() {
   };
 
   const renderRule = (signal: Signal) => {
-    const ruleType = signal.payload_json?.rule_type as string | undefined;
+    const ruleType = signal.payload_json?.rule_type;
     return ruleType ?? "N/A";
+  };
+
+  const renderTrade = (signal: Signal) => {
+    const trade = signal.payload_json?.suggested_trade;
+    if (!trade || !trade.legs || trade.legs.length === 0) return null;
+    const legsDesc = trade.legs
+      .slice(0, 3)
+      .map((leg) => {
+        const side = leg.side?.toUpperCase() ?? "?";
+        const label = leg.label ?? leg.option_id ?? "-";
+        const price = leg.reference_price ?? leg.limit_price;
+        return `${side} ${label}@${price === undefined ? "-" : price.toFixed(3)}`;
+      })
+      .join(" | ");
+    return (
+      <div style={{ marginTop: 4, fontSize: 12 }}>
+        <strong>Trade:</strong> {trade.action ?? "plan"} → {legsDesc}
+        {trade.rationale && <div style={{ color: "#6b7280" }}>{trade.rationale}</div>}
+      </div>
+    );
+  };
+
+  const renderBook = (signal: Signal) => {
+    const book = signal.payload_json?.book_snapshot;
+    if (!book || book.length === 0) return null;
+    const summary = book
+      .slice(0, 3)
+      .map((row) => {
+        const label = row.label ?? row.option_id ?? "-";
+        const price = row.price ?? 0;
+        return `${label}:${price.toFixed(3)}`;
+      })
+      .join(", ");
+    return (
+      <div style={{ marginTop: 2, fontSize: 12, color: "#6b7280" }}>
+        <strong>Book:</strong> {summary}
+      </div>
+    );
   };
 
   return (
@@ -148,6 +194,8 @@ export default function SignalList() {
             )}
             <div>Rule: {renderRule(signal)}</div>
             <div>Reason: {signal.reason ?? "N/A"}</div>
+            {renderTrade(signal)}
+            {renderBook(signal)}
           </div>
           <button onClick={() => setActiveSignal(signal.signal_id)}>下单</button>
         </div>

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { BookRow, SuggestedTrade } from "../types";
 
 interface Intent {
   intent_id: number;
@@ -60,12 +61,19 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
     transport?: string;
     payload?: Record<string, unknown>;
     checks?: { approved?: boolean; reasons?: string[] };
+    trade_plan_hint?: SuggestedTrade;
   };
   const checks = (detail?.checks || {}) as {
     approved?: boolean;
     reasons?: string[];
   };
   const reasons = useMemo(() => checks.reasons?.filter(Boolean) ?? [], [checks]);
+  const payload = detail?.payload as (Record<string, unknown> & {
+    suggested_trade?: SuggestedTrade;
+    book_snapshot?: BookRow[];
+  }) | undefined;
+  const tradePlan = payload?.suggested_trade ?? detail?.trade_plan_hint;
+  const bookSnapshot = payload?.book_snapshot;
   const riskState = checks.approved === undefined ? "pending" : checks.approved ? "approved" : "rejected";
 
   const statusColor =
@@ -125,6 +133,64 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
                 <p style={{ margin: 0, color: "#94a3b8" }}>暂无风险提示</p>
               )}
             </div>
+            {tradePlan && tradePlan.legs && tradePlan.legs.length > 0 && (
+              <div className="modal-summary" style={{ marginTop: 12 }}>
+                <h4 style={{ margin: "4px 0" }}>建议操作</h4>
+                <p style={{ margin: "4px 0", fontSize: 13 }}>
+                  {tradePlan.action ?? "plan"}{" "}
+                  {tradePlan.rationale ? `— ${tradePlan.rationale}` : null}
+                </p>
+                <table className="modal-table">
+                  <thead>
+                    <tr>
+                      <th>Side</th>
+                      <th>Leg</th>
+                      <th>Qty</th>
+                      <th>Ref</th>
+                      <th>Limit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tradePlan.legs.map((leg, idx) => (
+                      <tr key={`${leg.option_id}-${idx}`}>
+                        <td>{leg.side?.toUpperCase() ?? "-"}</td>
+                        <td>{leg.label ?? leg.option_id ?? "-"}</td>
+                        <td>{leg.qty ?? 1}</td>
+                        <td>{leg.reference_price === undefined ? "-" : leg.reference_price.toFixed(3)}</td>
+                        <td>{leg.limit_price === undefined ? "-" : leg.limit_price.toFixed(3)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {bookSnapshot && bookSnapshot.length > 0 && (
+              <div className="modal-summary" style={{ marginTop: 12 }}>
+                <h4 style={{ margin: "4px 0" }}>盘口快照</h4>
+                <table className="modal-table">
+                  <thead>
+                    <tr>
+                      <th>Leg</th>
+                      <th>Price</th>
+                      <th>Bid</th>
+                      <th>Ask</th>
+                      <th>Liquidity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bookSnapshot.slice(0, 5).map((row) => (
+                      <tr key={row.option_id}>
+                        <td>{row.label ?? row.option_id}</td>
+                        <td>{row.price === undefined ? "-" : row.price.toFixed(3)}</td>
+                        <td>{row.best_bid === undefined ? "-" : row.best_bid.toFixed(3)}</td>
+                        <td>{row.best_ask === undefined ? "-" : row.best_ask.toFixed(3)}</td>
+                        <td>{row.liquidity === undefined ? "-" : row.liquidity.toFixed(0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             <pre className="modal-detail">{JSON.stringify(intent.detail_json ?? {}, null, 2)}</pre>
           </div>
         )}

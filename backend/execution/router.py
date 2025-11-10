@@ -54,10 +54,17 @@ async def create_intent(
         raise HTTPException(status_code=400, detail="market has no liquidity")
     top_tick = max(latest.values(), key=lambda x: x.get("price") or 0)
     rule_type = (signal.get("payload_json") or {}).get("rule_type")
-    qty = request_payload.qty_override or 1
+    signal_payload = signal.get("payload_json") or {}
+    trade_plan_hint = signal_payload.get("suggested_trade") or {}
+    legs_hint = trade_plan_hint.get("legs") or []
+    primary_leg = legs_hint[0] if legs_hint else None
+    qty = request_payload.qty_override or (float(primary_leg.get("qty") or 1) if primary_leg else 1)
     ref_price = float(top_tick.get("price") or 0.5)
-    limit_price = request_payload.limit_price_override or ref_price
-    side = request_payload.side or ("buy" if signal.get("level") == "P1" else "sell")
+    inferred_leg_price = None
+    if primary_leg:
+        inferred_leg_price = float(primary_leg.get("limit_price") or primary_leg.get("reference_price") or ref_price)
+    limit_price = request_payload.limit_price_override or inferred_leg_price or ref_price
+    side = request_payload.side or (primary_leg.get("side") if primary_leg else ("buy" if signal.get("level") == "P1" else "sell"))
     # 根据风控滑点对价格做预夹
     allowed_slip = ref_price * (settings.exec_slippage_bps / 10000)
     if rule_type == "SUM_LT_1":
@@ -87,6 +94,7 @@ async def create_intent(
         "edge_score": signal_payload.get("edge_score"),
         "estimated_edge_bps": signal_payload.get("estimated_edge_bps"),
         "payload": signal_payload,
+        "trade_plan_hint": trade_plan_hint or None,
     }
     intent = await oems.create_suggested_intent(
         db,

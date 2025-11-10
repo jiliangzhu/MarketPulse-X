@@ -8,11 +8,14 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
 import yaml
 
 from backend.alerting.notifier_telegram import TelegramNotifier
 from backend.db import Database
-from backend.metrics import rule_eval_ms, signals_counter
+from backend.metrics import ml_inference_ms, rule_eval_ms, signals_counter
+from backend.ml.features import extract_features_realtime
+from backend.ml.inference import MLModel
 from backend.processing import scoring
 from backend.processing.synonym_matcher import SynonymMatcher
 from backend.repo import kpi_repo, markets_repo, signals_repo, ticks_repo
@@ -204,6 +207,30 @@ class RulesEngine:
         else:
             payload_json["rule_name"] = signal_payload.get("source", "ML")
             payload_json["rule_type"] = "ML"
+        extra_lines: list[str] = []
+        trade_hint = payload_json.get("suggested_trade")
+        if isinstance(trade_hint, dict):
+            legs = trade_hint.get("legs") or []
+            if legs:
+                leg_bits = []
+                for leg in legs[:3]:
+                    leg_bits.append(
+                        f"{leg.get('side', '?').upper()} "
+                        f"{(leg.get('label') or leg.get('option_id'))}:{_to_float(leg.get('reference_price') or leg.get('limit_price')):.3f}"
+                    )
+                extra_lines.append(f"Trade {trade_hint.get('action', '')}: {' | '.join(leg_bits)}")
+            rationale = trade_hint.get("rationale")
+            if rationale:
+                extra_lines.append(f"Plan: {rationale}")
+        book_snapshot = payload_json.get("book_snapshot")
+        if isinstance(book_snapshot, list) and book_snapshot:
+            book_bits = [
+                f"{entry.get('label') or entry.get('option_id')}:{_to_float(entry.get('price')):.3f}"
+                for entry in book_snapshot[:3]
+            ]
+            extra_lines.append("Book: " + ", ".join(book_bits))
+        if extra_lines:
+            signal_payload["message"] = f"{signal_payload['message']}\n" + "\n".join(extra_lines)
         edge_score = signal_payload.get("edge_score")
         if edge_score is not None:
             payload_json["edge_score"] = edge_score
@@ -318,6 +345,9 @@ class RulesEngine:
                 edge += self.settings.ml_fusion_rule_bonus
                 reason_parts.append(payload.get("message", payload.get("reason", "Rule signal")))
                 fused_payload = payload.copy()
+                trade_rationale = (payload.get("payload") or {}).get("suggested_trade", {}).get("rationale")
+                if trade_rationale:
+                    reason_parts.append(trade_rationale)
                 if ml_entry:
                     source_label = "hybrid"
             else:
@@ -350,6 +380,7 @@ class RulesEngine:
             return None
         threshold = rule.config.get("thresholds", {}).get("sum_price_lt", 1.0)
         min_liq = rule.config.get("thresholds", {}).get("min_liquidity", 0.0)
+        label_map = {opt.get("option_id"): opt.get("label", opt.get("option_id")) for opt in options_meta}
         total = sum(_to_float(tick.get("price")) for tick in latest_ticks.values())
         min_liquidity = min(_to_float(tick.get("liquidity")) for tick in latest_ticks.values())
         spread = sum(
@@ -374,6 +405,23 @@ class RulesEngine:
                 market,
                 f"Total price {total:.3f} (< {threshold})",
             )
+            book_snapshot = self._book_snapshot(options_meta, latest_ticks)
+            trade_legs = [
+                self._build_trade_leg(
+                    market["market_id"],
+                    option_id,
+                    "buy",
+                    _to_float(tick.get("price")),
+                    label=label_map.get(option_id, option_id),
+                )
+                for option_id, tick in latest_ticks.items()
+            ]
+            suggested_trade = self._trade_plan(
+                "basket_fill",
+                f"Buy each outcome to lock {edge*100:.2f}% edge (sum {total:.3f})",
+                trade_legs,
+                estimated_edge_bps=edge * 10000,
+            )
             return {
                 "score": score,
                 "message": message,
@@ -383,6 +431,8 @@ class RulesEngine:
                     "liquidity": min_liquidity,
                     "edge": edge,
                     "estimated_edge_bps": edge * 10000,
+                    "book_snapshot": book_snapshot,
+                    "suggested_trade": suggested_trade,
                 },
                 "edge_score": edge,
             }
@@ -411,10 +461,10 @@ class RulesEngine:
             for tick in latest_ticks.values()
         ) / max(len(latest_ticks), 1)
         metrics = {
-            "liquidity": min_liquidity / 10,
-            "spread": 1 / max(avg_spread, 0.01),
-            "edge": edge * 100,
-        }
+                "liquidity": min_liquidity / 10,
+                "spread": 1 / max(avg_spread, 0.01),
+                "edge": edge * 100,
+            }
         score = scoring.compute_score(
             rule.config.get("outputs", {}).get("score", {}).get("base", 75),
             rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
@@ -433,6 +483,17 @@ class RulesEngine:
             market,
             f"Dutch edge {edge*100:.2f}% (sum={total:.3f})",
         )
+        book_snapshot = self._book_snapshot(options_meta, latest_ticks)
+        trade_legs = [
+            self._build_trade_leg(market["market_id"], item["option_id"], "buy", item["price"])
+            for item in legs
+        ]
+        suggested_trade = self._trade_plan(
+            "dutch_book_basket",
+            f"Allocate across {len(trade_legs)} legs to capture {edge*100:.2f}% Dutch edge",
+            trade_legs,
+            estimated_edge_bps=edge * 10000,
+        )
         return {
             "score": score,
             "message": message,
@@ -441,6 +502,8 @@ class RulesEngine:
                 "legs": legs,
                 "edge": edge,
                 "estimated_edge_bps": edge * 10000,
+                "book_snapshot": book_snapshot,
+                "suggested_trade": suggested_trade,
             },
             "edge_score": edge,
         }
@@ -489,6 +552,22 @@ class RulesEngine:
                     market,
                     f"{label} {direction} {pct_change*100:.2f}%/{window_secs}s",
                 )
+                book_snapshot = self._book_snapshot(options_meta, latest_ticks)
+                trade_side = "buy" if pct_change > 0 else "sell"
+                trade_plan = self._trade_plan(
+                    "momentum_follow" if pct_change > 0 else "mean_revert",
+                    f"{label} moved {pct_change*100:.2f}% over {window_secs}s ({direction})",
+                    [
+                        self._build_trade_leg(
+                            market["market_id"],
+                            option_id,
+                            trade_side,
+                            _to_float(latest.get("price")),
+                            label=label,
+                        )
+                    ],
+                    estimated_edge_bps=abs(pct_change) * 10000,
+                )
                 return {
                     "score": score,
                     "message": message,
@@ -496,6 +575,8 @@ class RulesEngine:
                     "payload": {
                         "pct_change": pct_change,
                         "window_secs": window_secs,
+                        "book_snapshot": book_snapshot,
+                        "suggested_trade": trade_plan,
                     },
                     "edge_score": abs(pct_change),
                 }
@@ -554,6 +635,22 @@ class RulesEngine:
                 market,
                 f"{label} breakout {direction} {delta*100:.2f}%/{window_secs}s",
             )
+            book_snapshot = self._book_snapshot(options_meta, latest_ticks)
+            trade_side = "buy" if delta > 0 else "sell"
+            trade_plan = self._trade_plan(
+                "trend_breakout",
+                f"{label} trading {direction} {abs(delta)*100:.2f}% vs {window_secs}s average",
+                [
+                    self._build_trade_leg(
+                        market["market_id"],
+                        option_id,
+                        trade_side,
+                        current_price,
+                        label=label,
+                    )
+                ],
+                estimated_edge_bps=abs(delta) * 10000,
+            )
             return {
                 "score": score,
                 "message": message,
@@ -563,6 +660,8 @@ class RulesEngine:
                     "current_price": current_price,
                     "delta": delta,
                     "window_secs": window_secs,
+                    "book_snapshot": book_snapshot,
+                    "suggested_trade": trade_plan,
                 },
                 "edge_score": abs(delta),
             }
@@ -615,6 +714,21 @@ class RulesEngine:
                         market,
                         f"{label} trades at {price:.2f} with {minutes_to_end:.1f}m left",
                     )
+                    book_snapshot = self._book_snapshot(options_meta, latest_ticks)
+                    trade_plan = self._trade_plan(
+                        "endgame_sweep",
+                        f"Buy {label} at {price:.2f} with {minutes_to_end:.1f}m to expiry (z={z_score:.2f})",
+                        [
+                            self._build_trade_leg(
+                                market["market_id"],
+                                option_id,
+                                "buy",
+                                price,
+                                label=label,
+                            )
+                        ],
+                        estimated_edge_bps=max(0.0, price - min_price) * 10000,
+                    )
                     return {
                         "score": score,
                         "message": message,
@@ -623,6 +737,8 @@ class RulesEngine:
                             "price": price,
                             "minutes_to_end": minutes_to_end,
                             "z_score": z_score,
+                            "book_snapshot": book_snapshot,
+                            "suggested_trade": trade_plan,
                         },
                         "edge_score": max(0.0, price - min_price),
                     }
@@ -647,13 +763,18 @@ class RulesEngine:
                 ticks = snapshot.get("ticks") or {}
                 if not ticks:
                     continue
-                top_tick = max(ticks.values(), key=lambda t: _to_float(t.get("price")))
+                top_option_id, top_tick = max(
+                    ticks.items(),
+                    key=lambda item: _to_float(item[1].get("price")),
+                )
                 members.append(
                     {
                         "market_id": market_id,
+                        "option_id": top_option_id,
                         "price": _to_float(top_tick.get("price")),
                         "liquidity": _to_float(top_tick.get("liquidity")),
                         "market": snapshot["market"],
+                        "book_snapshot": self._book_snapshot(snapshot.get("options") or [], ticks),
                     }
                 )
             if len(members) < min_size:
@@ -690,6 +811,42 @@ class RulesEngine:
                             "leader": leader["market_id"],
                             "laggard": laggard["market_id"],
                             "estimated_edge_bps": gap * 10000,
+                            "comparables": [
+                                {
+                                    "market_id": leader["market_id"],
+                                    "price": leader["price"],
+                                    "liquidity": leader["liquidity"],
+                                    "role": "leader",
+                                },
+                                {
+                                    "market_id": laggard["market_id"],
+                                    "price": laggard["price"],
+                                    "liquidity": laggard["liquidity"],
+                                    "role": "laggard",
+                                },
+                            ],
+                            "book_snapshot": laggard.get("book_snapshot"),
+                            "suggested_trade": self._trade_plan(
+                                "pair_trade",
+                                f"Long {laggard['market_id']} vs short {leader['market_id']} gap {gap*100:.2f}%",
+                                [
+                                    self._build_trade_leg(
+                                        laggard["market_id"],
+                                        laggard.get("option_id", laggard["market_id"]),
+                                        "buy",
+                                        laggard["price"],
+                                        label="laggard",
+                                    ),
+                                    self._build_trade_leg(
+                                        leader["market_id"],
+                                        leader.get("option_id", leader["market_id"]),
+                                        "sell",
+                                        leader["price"],
+                                        label="leader",
+                                    ),
+                                ],
+                                estimated_edge_bps=gap * 10000,
+                            ),
                         },
                         "edge_score": gap,
                     },
@@ -755,6 +912,35 @@ class RulesEngine:
                 f"{target_label or 'yes'} misprice {gap*100:.2f}% "
                 f"({leader['market_id']} vs {laggard['market_id']})"
             )
+            laggard_snapshot = snapshots.get(laggard["market_id"]) or {}
+            book_snapshot = self._book_snapshot(
+                laggard_snapshot.get("options") or [],
+                laggard_snapshot.get("ticks") or {},
+            )
+            trade_legs = [
+                self._build_trade_leg(
+                    laggard["market_id"],
+                    laggard["option_id"],
+                    "buy",
+                    laggard["price"],
+                    label="laggard",
+                )
+            ]
+            trade_legs.append(
+                self._build_trade_leg(
+                    leader["market_id"],
+                    leader["option_id"],
+                    "sell",
+                    leader["price"],
+                    label="leader",
+                )
+            )
+            trade_plan = self._trade_plan(
+                "cross_market_pair",
+                f"Buy {laggard['market_id']} {target_label or 'leg'} and sell {leader['market_id']} gap {gap*100:.2f}%",
+                trade_legs,
+                estimated_edge_bps=gap * 10000,
+            )
             payloads.append(
                 (
                     laggard["market_id"],
@@ -767,12 +953,121 @@ class RulesEngine:
                             "laggard": laggard["market_id"],
                             "target_label": target_label,
                             "estimated_edge_bps": gap * 10000,
+                            "comparables": [
+                                {
+                                    "market_id": leader["market_id"],
+                                    "price": leader["price"],
+                                    "liquidity": leader["liquidity"],
+                                    "role": "leader",
+                                },
+                                {
+                                    "market_id": laggard["market_id"],
+                                    "price": laggard["price"],
+                                    "liquidity": laggard["liquidity"],
+                                    "role": "laggard",
+                                },
+                            ],
+                            "book_snapshot": book_snapshot,
+                            "suggested_trade": trade_plan,
                         },
                         "edge_score": gap,
                     },
                 )
             )
         return payloads
+
+    def _book_snapshot(
+        self,
+        options_meta: list[dict[str, Any]],
+        latest_ticks: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        label_map = {opt.get("option_id"): opt.get("label", opt.get("option_id")) for opt in options_meta}
+        snapshot: list[dict[str, Any]] = []
+        for option_id, tick in latest_ticks.items():
+            # Skip synthetic placeholder option_ids like "<market_id>-0/1" that contain '-'
+            if "-" in str(option_id or ""):
+                continue
+            ts_value = tick.get("ts")
+            if isinstance(ts_value, datetime):
+                ts_value = ts_value.isoformat()
+            snapshot.append(
+                {
+                    "option_id": option_id,
+                    "label": label_map.get(option_id, option_id),
+                    "price": _to_float(tick.get("price")),
+                    "best_bid": _to_float(tick.get("best_bid")),
+                    "best_ask": _to_float(tick.get("best_ask")),
+                    "liquidity": _to_float(tick.get("liquidity")),
+                    "ts": ts_value,
+                }
+            )
+        # De-duplicate by label: keep most recent timestamp if duplicates remain
+        if snapshot:
+            grouped = {}
+            for row in snapshot:
+                label = row.get("label") or row.get("option_id")
+                prev = grouped.get(label)
+                if prev is None or (row.get("ts") or "") > (prev.get("ts") or ""):
+                    grouped[label] = row
+            snapshot = list(grouped.values())
+        if not snapshot and options_meta:
+            for opt in options_meta:
+                snapshot.append(
+                    {
+                        "option_id": opt.get("option_id"),
+                        "label": opt.get("label"),
+                        "price": 0.0,
+                        "best_bid": 0.0,
+                        "best_ask": 0.0,
+                        "liquidity": 0.0,
+                        "ts": None,
+                    }
+                )
+        snapshot.sort(key=lambda item: item.get("label") or item.get("option_id", ""))
+        return snapshot
+
+    def _build_trade_leg(
+        self,
+        market_id: str,
+        option_id: str,
+        side: str,
+        price: float,
+        *,
+        label: Optional[str] = None,
+        qty: float = 1.0,
+    ) -> dict[str, Any]:
+        price = _to_float(price) or 0.0
+        slip = self.settings.exec_slippage_bps / 10000
+        if side == "buy":
+            limit_price = min(0.999, price * (1 + slip) if price else slip)
+        else:
+            limit_price = max(0.001, price * (1 - slip))
+        return {
+            "market_id": market_id,
+            "option_id": option_id,
+            "side": side,
+            "qty": qty,
+            "reference_price": price,
+            "limit_price": limit_price,
+            "label": label or option_id,
+        }
+
+    def _trade_plan(
+        self,
+        action: str,
+        rationale: str,
+        legs: list[dict[str, Any]],
+        *,
+        estimated_edge_bps: Optional[float] = None,
+        confidence: Optional[float] = None,
+    ) -> dict[str, Any]:
+        return {
+            "action": action,
+            "rationale": rationale,
+            "legs": legs,
+            "estimated_edge_bps": estimated_edge_bps,
+            "confidence": confidence,
+        }
 
     def _format_message(self, rule: Rule, market: dict[str, Any], insight: str) -> str:
         base_url = "http://localhost:5173/markets"

@@ -67,6 +67,7 @@ async def test_sum_rule_triggers(engine: RulesEngine):
     assert result is not None
     assert "score" in result
     assert result["edge_score"] > 0
+    assert result["payload"]["suggested_trade"]["action"] == "basket_fill"
 
 
 @pytest.mark.asyncio
@@ -84,6 +85,7 @@ async def test_dutch_rule(engine: RulesEngine):
     result = engine._rule_dutch_book(rule, {"title": "T", "market_id": "m"}, latest, recent, [])
     assert result is not None
     assert result["edge_score"] > 0
+    assert result["payload"]["suggested_trade"]["action"] == "dutch_book_basket"
 
 
 @pytest.mark.asyncio
@@ -101,6 +103,7 @@ async def test_spike_rule(engine: RulesEngine):
     result = engine._rule_spike(rule, {"title": "T", "market_id": "m"}, latest, recent, [])
     assert result is not None
     assert result["option_id"] == "o1"
+    assert "suggested_trade" in result["payload"]
 
 
 @pytest.mark.asyncio
@@ -133,6 +136,7 @@ async def test_trend_breakout_rule(engine: RulesEngine):
     )
     assert result is not None
     assert result["edge_score"] > 0
+    assert result["payload"]["suggested_trade"]["action"] == "trend_breakout"
 
 
 def test_synonym_rule(engine: RulesEngine):
@@ -160,6 +164,7 @@ def test_synonym_rule(engine: RulesEngine):
     market_id, payload = payloads[0]
     assert market_id == "m2"
     assert "gap" in payload["payload"]
+    assert payload["payload"]["suggested_trade"]["action"] == "pair_trade"
 
 
 def test_cross_market_rule(engine: RulesEngine):
@@ -188,6 +193,7 @@ def test_cross_market_rule(engine: RulesEngine):
     payloads = engine._rule_cross_market(rule, [{"name": "grp", "members": ["m1", "m2"]}], snapshots)
     assert payloads
     assert payloads[0][1]["edge_score"] == pytest.approx(0.2)
+    assert payloads[0][1]["payload"]["suggested_trade"]["action"] == "cross_market_pair"
 
 
 @pytest.mark.asyncio
