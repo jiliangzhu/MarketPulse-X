@@ -109,6 +109,8 @@ class RulesEngine:
         group_rules = [rule for rule in self.rules if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}]
         rule_signals: list[tuple[Optional[Rule], str, dict[str, Any]]] = []
         for market in markets:
+            if not self._is_market_enabled(market):
+                continue
             market_id = market["market_id"]
             ticks = await ticks_repo.latest_ticks_by_market(self.db, market_id)
             recent = await ticks_repo.recent_ticks(self.db, market_id, minutes=5, limit=250)
@@ -131,6 +133,8 @@ class RulesEngine:
             }
             for rule in self.rules:
                 if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}:
+                    continue
+                if not self._market_in_scope(rule, market):
                     continue
                 signal_payload = await self._evaluate_rule(rule, market, ticks, recent, options)
                 if signal_payload:
@@ -1095,3 +1099,21 @@ class RulesEngine:
         now = datetime.now(timezone.utc)
         delta = (ends_at - now).total_seconds() / 60
         return max(delta, 0)
+
+    def _is_market_enabled(self, market: dict[str, Any]) -> bool:
+        if self.settings.data_source == "mock":
+            return True
+        platform = (market.get("platform") or "polymarket").lower()
+        return platform == "polymarket"
+
+    def _market_in_scope(self, rule: Rule, market: dict[str, Any]) -> bool:
+        scope = rule.config.get("scope") or {}
+        platforms = scope.get("platforms")
+        if platforms and (market.get("platform") not in platforms):
+            return False
+        tags = scope.get("tags")
+        if tags:
+            market_tags = set(market.get("tags") or [])
+            if not market_tags.intersection(set(tags)):
+                return False
+        return True

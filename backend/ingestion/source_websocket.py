@@ -122,6 +122,7 @@ class WebSocketMarketSource:
                 best_ask = self._to_float(change.get("best_ask"))
                 if price == 0 and best_bid and best_ask:
                     price = (best_bid + best_ask) / 2
+                liquidity = self._derive_liquidity(change)
                 volume = self._to_float(change.get("size"))
                 tick = {
                     "ts": ts,
@@ -130,7 +131,7 @@ class WebSocketMarketSource:
                     "price": price or None,
                     "best_bid": best_bid or None,
                     "best_ask": best_ask or None,
-                    "liquidity": None,
+                    "liquidity": liquidity,
                     "volume": volume or None,
                 }
                 ticks_list.append(tick)
@@ -148,7 +149,7 @@ class WebSocketMarketSource:
                 "price": self._to_float(data.get("price")) or None,
                 "best_bid": None,
                 "best_ask": None,
-                "liquidity": None,
+                "liquidity": self._derive_liquidity(data),
                 "volume": self._to_float(data.get("size")) or None,
             }
             ticks_list.append(tick)
@@ -162,3 +163,17 @@ class WebSocketMarketSource:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    def _derive_liquidity(self, payload: dict[str, Any]) -> float | None:
+        candidates = [
+            payload.get("liquidity"),
+            payload.get("size"),
+            payload.get("best_bid_size"),
+            payload.get("best_ask_size"),
+            payload.get("volume"),
+        ]
+        for candidate in candidates:
+            value = self._to_float(candidate)
+            if value > 0:
+                return value
+        return None

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { apiRequest } from "../api";
 import type { BookRow, SuggestedTrade } from "../types";
 
 interface Intent {
@@ -19,31 +20,34 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
 
   useEffect(() => {
     if (!signalId) return;
+    const controller = new AbortController();
     setLoading(true);
-    fetch("/api/execution/intent", {
+    apiRequest<Intent>("/api/execution/intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ signal_id: signalId }),
+      signal: controller.signal,
     })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`Failed: ${res.status}`);
-        return res.json();
-      })
       .then((data) => {
         setIntent(data);
         setError(null);
       })
-      .catch((err) => setError((err as Error).message))
+      .catch((err) => {
+        if ((err as DOMException).name === "AbortError") return;
+        setError((err as Error).message);
+        setIntent(null);
+      })
       .finally(() => setLoading(false));
+    return () => controller.abort();
   }, [signalId]);
 
   const confirm = async () => {
     if (!intent) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/execution/confirm/${intent.intent_id}`, { method: "POST" });
-      if (!res.ok) throw new Error(`Confirm failed ${res.status}`);
-      const data = await res.json();
+      const data = await apiRequest<Intent>(`/api/execution/confirm/${intent.intent_id}`, {
+        method: "POST",
+      });
       setIntent((prev) => (prev ? { ...prev, ...data } : data));
     } catch (err) {
       setError((err as Error).message);
@@ -99,23 +103,23 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
   return (
     <div className="modal-backdrop">
       <div className="modal-card">
-        <h3>半自动下单</h3>
-        {loading && <p>Processing...</p>}
-        {error && <p style={{ color: "#f87171" }}>{error}</p>}
-        {intent && (
+        <div className="modal-title-row">
           <div>
-            <p>Intent #{intent.intent_id}</p>
-            <p>
-              Status: <span style={{ color: statusColor }}>{intent.status}</span>
-            </p>
+            <p className="signal-eyebrow">Execution</p>
+            <h3>半自动下单</h3>
+          </div>
+          {intent && <span className="pill" style={{ borderColor: statusColor, color: statusColor }}>{intent.status.toUpperCase()}</span>}
+        </div>
+        {loading && <div className="glass-panel">Processing…</div>}
+        {error && <div className="glass-panel error">{error}</div>}
+        {intent && !loading && !error && (
+          <>
             <div className="modal-summary">
               <p>Rule: {detail?.rule_type ?? "-"}</p>
               <p>Edge Score: {formatEdge(detail?.edge_score)}</p>
               <p>
                 Est. Edge (bps):{" "}
-                {detail?.estimated_edge_bps === undefined
-                  ? "-"
-                  : detail.estimated_edge_bps.toFixed(1)}
+                {detail?.estimated_edge_bps === undefined ? "-" : detail.estimated_edge_bps.toFixed(1)}
               </p>
               <p>Transport: {detail?.transport ?? "-"}</p>
             </div>
@@ -137,8 +141,7 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
               <div className="modal-summary" style={{ marginTop: 12 }}>
                 <h4 style={{ margin: "4px 0" }}>建议操作</h4>
                 <p style={{ margin: "4px 0", fontSize: 13 }}>
-                  {tradePlan.action ?? "plan"}{" "}
-                  {tradePlan.rationale ? `— ${tradePlan.rationale}` : null}
+                  {tradePlan.action ?? "plan"} {tradePlan.rationale ? `— ${tradePlan.rationale}` : null}
                 </p>
                 <table className="modal-table">
                   <thead>
@@ -192,11 +195,13 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
               </div>
             )}
             <pre className="modal-detail">{JSON.stringify(intent.detail_json ?? {}, null, 2)}</pre>
-          </div>
+          </>
         )}
         <div className="modal-actions">
-          <button onClick={onClose}>关闭</button>
-          <button disabled={disableConfirm} onClick={confirm}>
+          <button className="button-secondary" onClick={onClose}>
+            关闭
+          </button>
+          <button className="button-primary" disabled={disableConfirm} onClick={confirm}>
             确认执行
           </button>
         </div>

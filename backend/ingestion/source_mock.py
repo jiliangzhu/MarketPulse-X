@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
+from backend.settings import get_settings
+
 from .polymarket_client import MarketDataSource, MarketPayload, OptionPayload, TickPayload
 
 
@@ -17,12 +19,19 @@ class MockMarket:
     ends_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(hours=2))
     starts_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc) - timedelta(days=1))
     tags: list[str] = field(default_factory=list)
-    platform: str = "polymarket"
+    platform: str = "mock"
 
 
 class MockPolymarketSource(MarketDataSource):
-    def __init__(self) -> None:
+    def __init__(self, *, platform_label: str | None = None) -> None:
         random.seed(42)
+        if platform_label is None:
+            try:
+                settings = get_settings()
+                platform_label = "polymarket" if settings.data_source == "mock" else "mock"
+            except Exception:  # pragma: no cover - settings may not be initialized
+                platform_label = "mock"
+        self.platform_label = platform_label
         now = datetime.now(timezone.utc)
         self.markets: list[MockMarket] = [
             MockMarket(
@@ -30,18 +39,21 @@ class MockPolymarketSource(MarketDataSource):
                 title="Will candidate A win the election?",
                 ends_at=now + timedelta(hours=5),
                 tags=["politics"],
+                platform=self.platform_label,
             ),
             MockMarket(
                 market_id="mock-fed",
                 title="Will the Fed raise rates in December?",
                 ends_at=now + timedelta(days=2),
                 tags=["rates"],
+                platform=self.platform_label,
             ),
             MockMarket(
                 market_id="mock-endgame",
                 title="Will Team X sweep the finals?",
                 ends_at=now + timedelta(minutes=25),
                 tags=["sports"],
+                platform=self.platform_label,
             ),
         ]
         self.options: Dict[str, list[OptionPayload]] = {
