@@ -24,7 +24,10 @@ export default function KpiCards() {
   }, []);
 
   const summary = useMemo(() => {
-    const data: Record<string, { signals: number; p1: number; edge: number; gap: number; days: number }> = {};
+    const data: Record<
+      string,
+      { signals: number; p1: number; edge: number; gap: number; days: number }
+    > = {};
     rows.forEach((row) => {
       const bucket = data[row.rule_type] ?? { signals: 0, p1: 0, edge: 0, gap: 0, days: 0 };
       bucket.signals += row.signals;
@@ -43,20 +46,35 @@ export default function KpiCards() {
     }));
   }, [rows]);
 
-  if (error) return <p>Error loading KPI: {error}</p>;
+  if (error) return <div className="glass-panel error">{error}</div>;
   if (summary.length === 0) return null;
 
+  const totalSignals = summary.reduce((sum, item) => sum + item.signals, 0);
+  const totalP1 = summary.reduce((sum, item) => sum + item.p1, 0);
+
   return (
-    <div className="card">
-      <h3>近 7 日规则 KPI</h3>
-      <div className="kpi-grid">
+    <div className="glass-panel kpi-panel">
+      <div className="kpi-hero">
+        <div>
+          <p className="signal-eyebrow" style={{ letterSpacing: "0.35rem" }}>
+            近 7 日
+          </p>
+          <h3>{totalSignals} Signals</h3>
+          <p>{totalP1} escalated (P1)</p>
+        </div>
+        <div>
+          <p className="kpi-label">活跃规则</p>
+          <h4>{summary.length}</h4>
+        </div>
+      </div>
+      <div className="kpi-scroll">
         {summary.map((item) => (
-          <div key={item.rule} className="kpi-item">
+          <div key={item.rule} className="kpi-chip">
             <strong>{item.rule}</strong>
-            <p>Signals: {item.signals}</p>
-            <p>P1: {item.p1}</p>
-            <p>Avg gap: {item.avgGap?.toFixed(3) ?? "-"}</p>
-            <p>Edge bps: {item.avgEdge?.toFixed(2) ?? "-"}</p>
+            <p>Signals · {item.signals}</p>
+            <p>P1 · {item.p1}</p>
+            <p>Avg Gap · {item.avgGap?.toFixed(3) ?? "-"}</p>
+            <p>Edge bps · {item.avgEdge?.toFixed(2) ?? "-"}</p>
           </div>
         ))}
       </div>

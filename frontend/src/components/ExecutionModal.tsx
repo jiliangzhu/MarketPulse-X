@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiRequest } from "../api";
 import type { BookRow, SuggestedTrade } from "../types";
 
@@ -17,6 +18,21 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
   const [intent, setIntent] = useState<Intent | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
+
+  useEffect(() => {
+    if (!signalId || typeof document === "undefined") return;
+    const original = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = original;
+    };
+  }, [signalId]);
 
   useEffect(() => {
     if (!signalId) return;
@@ -40,23 +56,6 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, [signalId]);
-
-  const confirm = async () => {
-    if (!intent) return;
-    setLoading(true);
-    try {
-      const data = await apiRequest<Intent>(`/api/execution/confirm/${intent.intent_id}`, {
-        method: "POST",
-      });
-      setIntent((prev) => (prev ? { ...prev, ...data } : data));
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (!signalId) return null;
 
   const detail = intent?.detail_json as {
     rule_type?: string;
@@ -95,12 +94,38 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
   const disableConfirm =
     loading || !intent || ["filled", "rejected"].includes(intent.status.toLowerCase());
 
+  const formatNumber = (value?: number | null, digits = 3) => {
+    if (value === undefined || value === null || Number.isNaN(value)) {
+      return "-";
+    }
+    return Number(value).toFixed(digits);
+  };
+
   const formatEdge = (value?: number) => {
-    if (!value && value !== 0) return "-";
+    if (value === undefined || value === null || Number.isNaN(value)) return "-";
     return `${(value * 100).toFixed(2)}%`;
   };
 
-  return (
+  const confirm = async () => {
+    if (!intent) return;
+    setLoading(true);
+    try {
+      const data = await apiRequest<Intent>(`/api/execution/confirm/${intent.intent_id}`, {
+        method: "POST",
+      });
+      setIntent((prev) => (prev ? { ...prev, ...data } : data));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!signalId || !mounted || typeof document === "undefined") {
+    return null;
+  }
+
+  const modal = (
     <div className="modal-backdrop">
       <div className="modal-card">
         <div className="modal-title-row">
@@ -109,6 +134,9 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
             <h3>半自动下单</h3>
           </div>
           {intent && <span className="pill" style={{ borderColor: statusColor, color: statusColor }}>{intent.status.toUpperCase()}</span>}
+          <button className="button-icon" onClick={onClose} aria-label="Close modal">
+            ×
+          </button>
         </div>
         {loading && <div className="glass-panel">Processing…</div>}
         {error && <div className="glass-panel error">{error}</div>}
@@ -117,10 +145,7 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
             <div className="modal-summary">
               <p>Rule: {detail?.rule_type ?? "-"}</p>
               <p>Edge Score: {formatEdge(detail?.edge_score)}</p>
-              <p>
-                Est. Edge (bps):{" "}
-                {detail?.estimated_edge_bps === undefined ? "-" : detail.estimated_edge_bps.toFixed(1)}
-              </p>
+              <p>Est. Edge (bps): {formatNumber(detail?.estimated_edge_bps, 1)}</p>
               <p>Transport: {detail?.transport ?? "-"}</p>
             </div>
             <div className="risk-summary" style={{ borderColor: riskColor }}>
@@ -159,8 +184,8 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
                         <td>{leg.side?.toUpperCase() ?? "-"}</td>
                         <td>{leg.label ?? leg.option_id ?? "-"}</td>
                         <td>{leg.qty ?? 1}</td>
-                        <td>{leg.reference_price === undefined ? "-" : leg.reference_price.toFixed(3)}</td>
-                        <td>{leg.limit_price === undefined ? "-" : leg.limit_price.toFixed(3)}</td>
+                        <td>{formatNumber(leg.reference_price)}</td>
+                        <td>{formatNumber(leg.limit_price)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -184,10 +209,10 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
                     {bookSnapshot.slice(0, 5).map((row) => (
                       <tr key={row.option_id}>
                         <td>{row.label ?? row.option_id}</td>
-                        <td>{row.price === undefined ? "-" : row.price.toFixed(3)}</td>
-                        <td>{row.best_bid === undefined ? "-" : row.best_bid.toFixed(3)}</td>
-                        <td>{row.best_ask === undefined ? "-" : row.best_ask.toFixed(3)}</td>
-                        <td>{row.liquidity === undefined ? "-" : row.liquidity.toFixed(0)}</td>
+                        <td>{formatNumber(row.price)}</td>
+                        <td>{formatNumber(row.best_bid)}</td>
+                        <td>{formatNumber(row.best_ask)}</td>
+                        <td>{formatNumber(row.liquidity, 0)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -208,4 +233,6 @@ export default function ExecutionModal({ signalId, onClose }: Props) {
       </div>
     </div>
   );
+
+  return createPortal(modal, document.body);
 }

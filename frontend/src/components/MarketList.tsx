@@ -1,20 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchMarkets } from "../api";
-
-interface MarketOption {
-  option_id: string;
-  label: string;
-  last_price?: number;
-}
-
-interface MarketSummary {
-  market_id: string;
-  title: string;
-  status: string;
-  ends_at?: string;
-  options: MarketOption[];
-}
+import type { MarketSummary } from "../types";
 
 const PAGE_SIZES = [10, 20, 50];
 

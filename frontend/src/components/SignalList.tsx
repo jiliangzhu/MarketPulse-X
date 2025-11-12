@@ -1,27 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, fetchSignals } from "../api";
-import type { BookRow, SuggestedTrade } from "../types";
+import type { SignalRecord } from "../types";
 import ExecutionModal from "./ExecutionModal";
-
-interface SignalPayload extends Record<string, unknown> {
-  edge_score?: number;
-  rule_type?: string;
-  suggested_trade?: SuggestedTrade;
-  book_snapshot?: BookRow[];
-}
-
-interface Signal {
-  signal_id: number;
-  market_id: string;
-  level: string;
-  score?: number;
-  edge_score?: number;
-  payload_json?: SignalPayload;
-  created_at: string;
-  source?: string;
-  confidence?: number;
-  reason?: string;
-}
 
 const levels = ["all", "P1", "P2", "P3"] as const;
 const PAGE_SIZES = [10, 20, 50];
@@ -29,7 +9,7 @@ const PAGE_SIZES = [10, 20, 50];
 type LevelFilter = (typeof levels)[number];
 
 export default function SignalList() {
-  const [signals, setSignals] = useState<Signal[]>([]);
+  const [signals, setSignals] = useState<SignalRecord[]>([]);
   const [level, setLevel] = useState<LevelFilter>("all");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,7 +68,7 @@ export default function SignalList() {
     }
   };
 
-  const renderEdge = (signal: Signal) => {
+  const renderEdge = (signal: SignalRecord) => {
     const payloadEdge = signal.payload_json?.edge_score;
     const value = signal.edge_score ?? payloadEdge;
     if (value === undefined || Number.isNaN(value)) {
@@ -97,12 +77,12 @@ export default function SignalList() {
     return `${(value * 100).toFixed(2)}%`;
   };
 
-  const renderRule = (signal: Signal) => {
+  const renderRule = (signal: SignalRecord) => {
     const ruleType = signal.payload_json?.rule_type;
     return ruleType ?? "N/A";
   };
 
-  const renderTrade = (signal: Signal) => {
+  const renderTrade = (signal: SignalRecord) => {
     const trade = signal.payload_json?.suggested_trade;
     if (!trade || !trade.legs || trade.legs.length === 0) return null;
     const legsDesc = trade.legs
@@ -122,7 +102,7 @@ export default function SignalList() {
     );
   };
 
-  const renderBook = (signal: Signal) => {
+  const renderBook = (signal: SignalRecord) => {
     const book = signal.payload_json?.book_snapshot;
     if (!book || book.length === 0) return null;
     const summary = book
@@ -140,6 +120,7 @@ export default function SignalList() {
     () =>
       signals.map((signal) => (
         <button
+          type="button"
           key={signal.signal_id}
           className="signal-card"
           onClick={() => setActiveSignal(signal.signal_id)}

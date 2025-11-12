@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import MarketList from "../components/MarketList";
 import SignalList from "../components/SignalList";
 import KpiCards from "../components/KpiCards";
-import RunbookCard from "../components/RunbookCard";
 
 interface Health {
   status: string;
@@ -35,21 +34,23 @@ export default function Dashboard() {
   }, []);
 
   return (
-    <div className="flex">
-      <div className="column">
+    <div className="dashboard-grid">
+      <div className="column wide">
         <KpiCards />
         <SignalList />
+      </div>
+      <div className="column narrow">
+        <MarketList />
         {health && (
-          <div className="card">
-            <h3>Health</h3>
-            <p>DB: {health.db}</p>
-            <p>Rules: {health.rules_heartbeat}</p>
+          <div className="glass-panel health-card">
+            <p className="signal-eyebrow" style={{ letterSpacing: "0.4rem" }}>
+              STATUS
+            </p>
+            <h3>System Health</h3>
+            <p>Data Plane: {health.db}</p>
+            <p>Rules Engine: {health.rules_heartbeat}</p>
           </div>
         )}
-      </div>
-      <div className="column">
-        <MarketList />
-        <RunbookCard />
       </div>
     </div>
   );

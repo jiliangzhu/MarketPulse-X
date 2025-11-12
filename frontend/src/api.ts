@@ -1,52 +1,55 @@
+import type { MarketDetail, MarketSummary, SignalRecord } from "./types";
+
 const inferApiBase = () => {
   if (typeof window === "undefined") return "";
-  const { protocol, hostname, port } = window.location;
-  if (port === "5173" || port === "4173") {
-    return `${protocol}//${hostname}:8080`;
-  }
-  return "";
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:8080`;
 };
 
-let resolvedBase: string | null = import.meta.env.VITE_API_BASE ?? null;
+let cachedDirectBase: string | null = import.meta.env.VITE_API_BASE ?? null;
 
-const getApiBase = () => {
-  if (resolvedBase !== null) {
-    return resolvedBase;
+const getDirectBase = () => {
+  if (cachedDirectBase === null) {
+    const inferred = inferApiBase();
+    cachedDirectBase = inferred || "";
   }
-  const candidate = inferApiBase();
-  if (candidate) {
-    resolvedBase = candidate;
-    return candidate;
-  }
-  return "";
+  return cachedDirectBase;
 };
 
-async function doFetch<T>(path: string, init: RequestInit | undefined, attempt: "direct" | "proxy"): Promise<T> {
-  const base = attempt === "direct" ? getApiBase() : "";
+async function fetchWithBase<T>(
+  path: string,
+  init: RequestInit | undefined,
+  base: string,
+): Promise<T> {
   const url = base ? `${base}${path}` : path;
-  try {
-    const res = await fetch(url, init);
-    if (!res.ok) {
-      throw new Error(`Request failed: ${res.status}`);
-    }
-    return res.json();
-  } catch (err) {
-    if (attempt === "direct") {
-      return doFetch(path, init, "proxy");
-    }
-    throw err;
+  const res = await fetch(url, init);
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
   }
+  return res.json();
 }
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  return doFetch<T>(path, init, "direct");
+  const baseChain: string[] = [""];
+  const direct = getDirectBase();
+  if (direct) baseChain.push(direct);
+  let lastError: unknown = null;
+  for (const base of baseChain) {
+    try {
+      return await fetchWithBase<T>(path, init, base);
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+  throw lastError ?? new Error("API request failed");
 }
 
 export function fetchMarkets(limit = 20, offset = 0) {
   const params = new URLSearchParams();
   params.append("limit", String(limit));
   params.append("offset", String(offset));
-  return apiRequest(`/api/markets?${params.toString()}`);
+  return apiRequest<MarketSummary[]>(`/api/markets?${params.toString()}`);
 }
 
 export function fetchSignals(level?: string, limit = 10, offset = 0) {
@@ -55,9 +58,9 @@ export function fetchSignals(level?: string, limit = 10, offset = 0) {
   searchParams.append("limit", String(limit));
   searchParams.append("offset", String(offset));
   const query = searchParams.toString();
-  return apiRequest(`/api/signals${query ? `?${query}` : ""}`);
+  return apiRequest<SignalRecord[]>(`/api/signals${query ? `?${query}` : ""}`);
 }
 
 export function fetchMarketDetail(id: string) {
-  return apiRequest(`/api/markets/${id}`);
+  return apiRequest<MarketDetail>(`/api/markets/${id}`);
 }

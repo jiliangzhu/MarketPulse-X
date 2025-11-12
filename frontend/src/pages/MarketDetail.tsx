@@ -1,28 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { fetchMarketDetail } from "../api";
-
-interface SparkPoint {
-  ts: string;
-  option_id: string;
-  price: number;
-}
-
-interface MarketOption {
-  option_id: string;
-  label: string;
-  last_price?: number;
-  last_ts?: string;
-}
-
-interface MarketDetail {
-  market_id: string;
-  title: string;
-  status: string;
-  sparkline: SparkPoint[];
-  options: MarketOption[];
-  synonyms?: string[];
-}
+import type { MarketDetail } from "../types";
 
 export default function MarketDetail() {
   const { id } = useParams();
@@ -32,11 +11,12 @@ export default function MarketDetail() {
 
   useEffect(() => {
     if (!id) return;
+    const marketId = id;
     let cancelled = false;
     async function load() {
       setLoading(true);
       try {
-        const data = await fetchMarketDetail(id);
+        const data = await fetchMarketDetail(marketId);
         if (!cancelled) {
           setMarket(data);
           setError(null);
