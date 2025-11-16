@@ -247,7 +247,11 @@ def build_report(portfolio: Portfolio) -> dict[str, Any]:
         sharpe = 0.0
 
     trades_df = pd.DataFrame(portfolio.history)
-    closed = trades_df[trades_df["realized_pnl"] != 0] if not trades_df.empty else pd.DataFrame()
+    if trades_df.empty:
+        trades_df = pd.DataFrame(columns=["realized_pnl"])
+    if "realized_pnl" not in trades_df.columns:
+        trades_df["realized_pnl"] = 0.0
+    closed = trades_df[trades_df["realized_pnl"] != 0]
     wins = closed[closed["realized_pnl"] > 0]
     losses = closed[closed["realized_pnl"] < 0]
     win_rate = len(wins) / len(closed) if len(closed) else 0
