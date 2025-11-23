@@ -1,9 +1,30 @@
 threshold: 0.78
 min_size: 2
 groups:
-  - name: "US Election Cluster"
-    explicit: ["mock-election"]
-  - name: "Fed Rate Moves"
-    explicit: ["mock-fed"]
-  - name: "Final Sweep"
-    explicit: ["mock-endgame"]
+  - name: "2025 Eurasia Geopolitics"
+    explicit:
+      - "516719"  # Russia-Ukraine ceasefire
+      - "516715"  # Ukraine joins NATO
+      - "516720"  # Putin out
+      - "516717"  # Nuclear detonation
+      - "516721"  # Netanyahu out
+      - "516716"  # Khamenei out
+  - name: "2025 Stablecoin & BTC Stress"
+    explicit:
+      - "516713"  # USDT depeg
+      - "516712"  # Tether insolvent
+      - "516862"  # BTC 250k
+      - "516861"  # BTC 1M
+  - name: "2025 US Macro & Fed Path"
+    explicit:
+      - "516710"  # US recession
+      - "516728"  # 5 rate cuts
+      - "516730"  # 7 rate cuts
+      - "516731"  # 6 rate cuts
+      - "516706"  # Fed rate hike
+  - name: "2025 MegaCap Leadership"
+    explicit:
+      - "516841"  # Andy Jassy out
+      - "516842"  # Brian Armstrong out
+      - "516838"  # Tim Cook out
+      - "516837"  # Sundar Pichai out

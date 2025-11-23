@@ -144,22 +144,38 @@ async def fetch_recent_markets(db: Database, days_back: int) -> list[MarketRow]:
             GROUP BY market_id
         )
         SELECT m.market_id,
-               m.condition_id,
+               NULL::text AS condition_id,
                m.title,
-               m.category,
+               NULL::text AS category,
                m.ends_at,
-               m.closed,
+               (m.status = 'closed') AS closed,
                m.embedding,
                m.tags,
-               COALESCE(rs.recent_volume, 0) AS recent_volume
+               COALESCE(rs.recent_volume, 0) AS recent_volume,
+               COALESCE(rs.last_tick_ts, m.ends_at, now()) AS freshness
         FROM market m
         LEFT JOIN recent_stats rs ON rs.market_id = m.market_id
         WHERE m.embedding IS NOT NULL
-          AND (COALESCE(m.updated_at, now()) >= $1 OR COALESCE(m.ends_at, now()) >= $2)
+          AND (
+                rs.last_tick_ts >= $1
+                OR COALESCE(m.ends_at, now()) >= $2
+              )
         """,
         cutoff,
         cutoff,
     )
+    def _normalize_embedding(value: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [float(v) for v in value]
+        if isinstance(value, str):
+            cleaned = value.strip("[]{}()")
+            if not cleaned:
+                return None
+            return [float(part) for part in cleaned.split(",") if part.strip()]
+        return None
+
     return [
         MarketRow(
             market_id=row["market_id"],
@@ -168,7 +184,7 @@ async def fetch_recent_markets(db: Database, days_back: int) -> list[MarketRow]:
             category=row.get("category"),
             ends_at=row.get("ends_at"),
             closed=row.get("closed", False),
-            embedding=list(row["embedding"]) if row.get("embedding") else None,
+            embedding=_normalize_embedding(row.get("embedding")),
             tags=row.get("tags") or [],
             recent_volume=float(row.get("recent_volume") or 0),
         )
