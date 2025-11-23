@@ -52,25 +52,6 @@ def _sample_ticks():
 
 
 @pytest.mark.asyncio
-async def test_sum_rule_triggers(engine: RulesEngine):
-    rule = Rule(
-        name="sum",
-        type="SUM_LT_1",
-        config={
-            "thresholds": {"sum_price_lt": 1.1, "min_liquidity": 200},
-            "outputs": {"score": {"base": 60, "weights": {}}},
-        },
-        rule_id=1,
-    )
-    latest, recent = _sample_ticks()
-    result = engine._rule_sum_lt_1(rule, {"title": "T", "market_id": "m", "ends_at": datetime.now(timezone.utc)}, latest, recent, [])
-    assert result is not None
-    assert "score" in result
-    assert result["edge_score"] > 0
-    assert result["payload"]["suggested_trade"]["action"] == "basket_fill"
-
-
-@pytest.mark.asyncio
 async def test_dutch_rule(engine: RulesEngine):
     rule = Rule(
         name="dutch",
@@ -106,101 +87,55 @@ async def test_spike_rule(engine: RulesEngine):
     assert "suggested_trade" in result["payload"]
 
 
-@pytest.mark.asyncio
-async def test_trend_breakout_rule(engine: RulesEngine):
-    now = datetime.now(timezone.utc)
-    latest = {
-        "o1": {"price": 0.55, "liquidity": 500},
-    }
-    recent = [
-        {"option_id": "o1", "ts": now - timedelta(seconds=50), "price": 0.5},
-        {"option_id": "o1", "ts": now - timedelta(seconds=40), "price": 0.51},
-        {"option_id": "o1", "ts": now - timedelta(seconds=30), "price": 0.5},
-        {"option_id": "o1", "ts": now - timedelta(seconds=10), "price": 0.55},
-    ]
-    rule = Rule(
-        name="trend",
-        type="TREND_BREAKOUT",
-        config={
-            "params": {"lookback_secs": 60, "pct_breakout": 0.02, "min_points": 3, "min_liquidity": 100},
-            "outputs": {"score": {"base": 55, "weights": {}}},
-        },
-        rule_id=6,
-    )
-    result = engine._rule_trend_breakout(
-        rule,
-        {"title": "T", "market_id": "m", "ends_at": now + timedelta(hours=1)},
-        latest,
-        recent,
-        [{"option_id": "o1", "label": "Yes"}],
-    )
-    assert result is not None
-    assert result["edge_score"] > 0
-    assert result["payload"]["suggested_trade"]["action"] == "trend_breakout"
-
-
-def test_synonym_rule(engine: RulesEngine):
-    rule = Rule(
-        name="synonym",
-        type="SYNONYM_MISPRICE",
-        config={
-            "params": {"group_min_size": 2, "price_gap_gt": 0.02, "min_liquidity": 100},
-            "outputs": {"score": {"base": 65, "weights": {"gap": 0.5}}},
-        },
-        rule_id=3,
-    )
-    snapshots = {
-        "m1": {
-            "market": {"market_id": "m1", "title": "A", "ends_at": datetime.now(timezone.utc)},
-            "ticks": {"o1": {"price": 0.8, "liquidity": 500}},
-        },
-        "m2": {
-            "market": {"market_id": "m2", "title": "B", "ends_at": datetime.now(timezone.utc)},
-            "ticks": {"o1": {"price": 0.7, "liquidity": 500}},
-        },
-    }
-    payloads = engine._rule_synonym(rule, [{"name": "grp", "members": ["m1", "m2"]}], snapshots)
-    assert payloads
-    market_id, payload = payloads[0]
-    assert market_id == "m2"
-    assert "gap" in payload["payload"]
-    assert payload["payload"]["suggested_trade"]["action"] == "pair_trade"
-
-
 def test_cross_market_rule(engine: RulesEngine):
     now = datetime.now(timezone.utc)
     snapshots = {
         "m1": {
             "market": {"market_id": "m1", "title": "A", "ends_at": now},
-            "ticks": {"opt-yes": {"price": 0.6, "liquidity": 600}},
-            "options": [{"option_id": "opt-yes", "label": "Yes"}],
+            "ticks": {
+                "opt-yes": {"price": 0.6, "liquidity": 600},
+                "opt-no": {"price": 0.45, "liquidity": 600},
+            },
+            "options": [
+                {"option_id": "opt-yes", "label": "Yes"},
+                {"option_id": "opt-no", "label": "No"},
+            ],
         },
         "m2": {
             "market": {"market_id": "m2", "title": "B", "ends_at": now},
-            "ticks": {"opt-yes": {"price": 0.4, "liquidity": 600}},
-            "options": [{"option_id": "opt-yes", "label": "Yes"}],
+            "ticks": {
+                "opt-yes": {"price": 0.55, "liquidity": 600},
+                "opt-no": {"price": 0.3, "liquidity": 600},
+            },
+            "options": [
+                {"option_id": "opt-yes", "label": "Yes"},
+                {"option_id": "opt-no", "label": "No"},
+            ],
         },
     }
     rule = Rule(
         name="cross",
         type="CROSS_MARKET_MISPRICE",
         config={
-            "params": {"group_min_size": 2, "price_diff_threshold": 0.05, "min_liquidity": 100, "target_label": "yes"},
+            "params": {"group_min_size": 2, "price_diff_threshold": 0.05, "min_liquidity": 100},
             "outputs": {"score": {"base": 65, "weights": {}}},
         },
         rule_id=5,
     )
     payloads = engine._rule_cross_market(rule, [{"name": "grp", "members": ["m1", "m2"]}], snapshots)
     assert payloads
-    assert payloads[0][1]["edge_score"] == pytest.approx(0.2)
-    assert payloads[0][1]["payload"]["suggested_trade"]["action"] == "cross_market_pair"
+    market_id, payload = payloads[0]
+    assert market_id == "m2"
+    assert payload["edge_score"] == pytest.approx(0.15)
+    assert payload["payload"]["target_label"] == "No"
+    assert payload["payload"]["suggested_trade"]["action"] == "cross_market_pair"
 
 
 @pytest.mark.asyncio
 async def test_emit_signal(monkeypatch, engine: RulesEngine):
     rule = Rule(
-        name="sum",
-        type="SUM_LT_1",
+        name="cross",
+        type="CROSS_MARKET_MISPRICE",
         config={"outputs": {"level": "P1", "score": {"base": 60, "weights": {}}}},
         rule_id=7,
     )

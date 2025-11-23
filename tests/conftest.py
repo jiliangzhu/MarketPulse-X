@@ -56,15 +56,15 @@ class FakeDB:
                 "option_id": "m1-yes",
                 "level": "P1",
                 "score": 80,
-                "payload_json": {"transport": "telegram-dry-run", "rule_type": "SUM_LT_1"},
-                 "edge_score": 0.05,
+                "payload_json": {"transport": "telegram-dry-run", "rule_type": "CROSS_MARKET_MISPRICE"},
+                "edge_score": 0.05,
                 "created_at": now,
             }
         ]
         self.kpi_rows = [
             {
                 "day": now.date(),
-                "rule_type": "SUM_LT_1",
+                "rule_type": "CROSS_MARKET_MISPRICE",
                 "signals": 1,
                 "p1_signals": 1,
                 "avg_gap": 0.02,

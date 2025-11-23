@@ -51,13 +51,11 @@ This document summarizes the capabilities delivered by the current MarketPulse-X
 
 ### 4.1 DSL Coverage
 Located in `configs/rules/`:
-- `SUM_LT_1` — Detects when multi-outcome prices sum < 1.
-- `SPIKE_DETECT` — Monitors 10-second price velocity and liquidity threshold.
-- `ENDGAME_SWEEP` — Flags high-price, near-expiration sweeps with volume z-score check.
-- `SYNONYM_MISPRICE` — Uses `synonym_matcher` to compare grouped markets and trigger when price gap > 2.5%.
-- `DUTCH_BOOK_DETECT` — Detects baskets whose probabilities sum < 0.995, computes `edge_score = 1 - Σp`.
-- `CROSS_MARKET_MISPRICE` — Within synonym groups, compares identical outcomes (e.g., “Yes”) between markets; triggers when price diff exceeds configurable threshold.
-- `TREND_BREAKOUT` — Looks for >X% deviation between latest price and rolling mean within lookback window, capturing trend shifts.
+- `SPIKE_DETECT` — 10 秒价格/成交量冲击，结合最小流动性阈值。
+- `ENDGAME_SWEEP` — T-30 分钟内，高赔率+成交量 z 分的尾盘扫货。
+- `DUTCH_BOOK_DETECT` — Outcome 篮子概率和 < 阈值，估算 edge = 1 - Σp。
+- `CROSS_MARKET_MISPRICE` — 在同义组中按 option label 匹配，扫描任意腿（Yes/No/候选人）价差，输出双边交易建议。
+- **ML Fusion** — LightGBM 模型实时得出套利置信度，并与规则信号融合，生成统一 `edge_score`。
 
 Each rule handler now returns an `edge_score` (e.g., price gap, dutch edge, breakout delta) which is stored in `signal.edge_score`, exposed via `/api/signals`, and surfaced on the dashboard/execution modal.
 

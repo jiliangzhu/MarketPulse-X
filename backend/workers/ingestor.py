@@ -51,7 +51,11 @@ async def main() -> None:
             await db.disconnect()
         return
 
-    http_source = RealPolymarketSource()
+    http_source = RealPolymarketSource(
+        max_markets=settings.market_bootstrap_limit,
+        min_liquidity=settings.market_min_liquidity,
+        min_volume_24h=settings.market_min_volume_24h,
+    )
     logger.info("Bootstrapping asset list via HTTP...")
     markets = await http_source.list_markets()
     asset_to_market_map: dict[str, str] = {}

@@ -1,0 +1,18 @@
+name: "Crypto Lead-Lag"
+type: "CRYPTO_LEAD_LAG"
+enabled: true
+scope: {}
+params:
+  return_threshold: 0.003
+  poly_drift_threshold: 0.002
+  spread_limit: 0.05
+  min_liquidity: 500
+outputs:
+  level: "P1"
+  score:
+    base: 60
+    weights:
+      momentum: 0.4
+      liquidity: 0.3
+dedupe:
+  cooldown_secs: 120

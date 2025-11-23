@@ -14,6 +14,7 @@ import yaml
 from backend.alerting.notifier_telegram import TelegramNotifier
 from backend.db import Database
 from backend.metrics import ml_inference_ms, rule_eval_ms, signals_counter
+from backend.ingestion.source_binance import BinancePriceCache
 from backend.ml.features import extract_features_realtime
 from backend.ml.inference import MLModel
 from backend.processing import scoring
@@ -64,6 +65,12 @@ class RulesEngine:
         self.ml_model: Optional[MLModel] = None
         self.ml_interval = settings.ml_inference_interval_secs
         self.last_ml_run = 0.0
+        self._latest_snapshots: dict[str, dict[str, Any]] = {}
+        self.binance_cache = BinancePriceCache.get_instance()
+        try:
+            self.binance_cache.ensure_running()
+        except RuntimeError:
+            self.logger.warning("binance-feed-skip", extra={"reason": "no-running-loop"})
         if self.settings.ml_enabled:
             try:
                 self.ml_model = MLModel(self.settings.ml_model_path)
@@ -106,7 +113,7 @@ class RulesEngine:
         start = time.perf_counter()
         markets = await markets_repo.list_markets(self.db, status="active", limit=100)
         snapshots: dict[str, dict[str, Any]] = {}
-        group_rules = [rule for rule in self.rules if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}]
+        group_rules = [rule for rule in self.rules if rule.type == "CROSS_MARKET_MISPRICE"]
         rule_signals: list[tuple[Optional[Rule], str, dict[str, Any]]] = []
         for market in markets:
             if not self._is_market_enabled(market):
@@ -130,9 +137,10 @@ class RulesEngine:
                 "recent": recent,
                 "options": options,
                 "synonym_peers": peer_entries,
+                "synonym_ids": synonym_ids,
             }
             for rule in self.rules:
-                if rule.type in {"SYNONYM_MISPRICE", "CROSS_MARKET_MISPRICE"}:
+                if rule.type == "CROSS_MARKET_MISPRICE":
                     continue
                 if not self._market_in_scope(rule, market):
                     continue
@@ -142,12 +150,10 @@ class RulesEngine:
         if group_rules:
             groups = await self.synonym_matcher.build_groups(self.db)
             for rule in group_rules:
-                if rule.type == "SYNONYM_MISPRICE":
-                    payloads = self._rule_synonym(rule, groups, snapshots)
-                else:
-                    payloads = self._rule_cross_market(rule, groups, snapshots)
+                payloads = self._rule_cross_market(rule, groups, snapshots)
                 for market_id, payload in payloads:
                     rule_signals.append((rule, market_id, payload))
+        self._latest_snapshots = snapshots
 
         ml_signals: list[dict[str, Any]] = []
         if self.ml_model and (time.time() - self.last_ml_run >= self.ml_interval):
@@ -204,6 +210,10 @@ class RulesEngine:
             return
         self._cooldowns[dedupe_key] = now
         payload_json = signal_payload.get("payload") or {}
+        snapshot_ctx = self._latest_snapshots.get(market_id) or {}
+        market_title = (snapshot_ctx.get("market") or {}).get("title")
+        if market_title and "market_title" not in payload_json:
+            payload_json["market_title"] = market_title
         if rule:
             payload_json["rule_name"] = rule.name
             payload_json["rule_id"] = rule.rule_id
@@ -299,18 +309,18 @@ class RulesEngine:
         recent_ticks: list[dict[str, Any]],
         options_meta: list[dict[str, Any]],
     ) -> Optional[dict[str, Any]]:
-        if rule.type == "SUM_LT_1":
-            return self._rule_sum_lt_1(rule, market, latest_ticks, recent_ticks, options_meta)
         if rule.type == "SPIKE_DETECT":
             return self._rule_spike(rule, market, latest_ticks, recent_ticks, options_meta)
         if rule.type == "ENDGAME_SWEEP":
             return self._rule_endgame(rule, market, latest_ticks, recent_ticks, options_meta)
         if rule.type == "DUTCH_BOOK_DETECT":
             return self._rule_dutch_book(rule, market, latest_ticks, recent_ticks, options_meta)
-        if rule.type == "TREND_BREAKOUT":
-            return self._rule_trend_breakout(rule, market, latest_ticks, recent_ticks, options_meta)
-        if rule.type == "SYNONYM_MISPRICE":
-            return None
+        if rule.type == "CRYPTO_LEAD_LAG":
+            return self._rule_crypto_lead_lag(rule, market, latest_ticks, recent_ticks, options_meta)
+        if rule.type == "TEMPORAL_ARBITRAGE":
+            return self._rule_temporal_arbitrage(rule, market, latest_ticks, options_meta)
+        if rule.type == "ORDER_BOOK_IMBALANCE":
+            return self._rule_order_book_imbalance(rule, market, latest_ticks, recent_ticks, options_meta)
         if rule.type == "CROSS_MARKET_MISPRICE":
             return None
         return None
@@ -371,76 +381,6 @@ class RulesEngine:
             fused_payload["rule"] = rule_obj
             fused.append(fused_payload)
         return fused
-
-    def _rule_sum_lt_1(
-        self,
-        rule: Rule,
-        market: dict[str, Any],
-        latest_ticks: dict[str, dict[str, Any]],
-        recent_ticks: list[dict[str, Any]],
-        options_meta: list[dict[str, Any]],
-    ) -> Optional[dict[str, Any]]:
-        if not latest_ticks:
-            return None
-        threshold = rule.config.get("thresholds", {}).get("sum_price_lt", 1.0)
-        min_liq = rule.config.get("thresholds", {}).get("min_liquidity", 0.0)
-        label_map = {opt.get("option_id"): opt.get("label", opt.get("option_id")) for opt in options_meta}
-        total = sum(_to_float(tick.get("price")) for tick in latest_ticks.values())
-        min_liquidity = min(_to_float(tick.get("liquidity")) for tick in latest_ticks.values())
-        spread = sum(
-            max(0.0, _to_float(tick.get("best_ask")) - _to_float(tick.get("best_bid")))
-            for tick in latest_ticks.values()
-        ) / max(len(latest_ticks), 1)
-        if total < threshold and min_liquidity >= min_liq:
-            edge = max(0.0, threshold - total)
-            metrics = {
-                "liquidity": min_liquidity / 10,
-                "spread": 1 / max(spread, 0.01),
-                "time_to_end": (self._minutes_to_end(market) or 0) / 10,
-                "edge": edge * 100,
-            }
-            score = scoring.compute_score(
-                rule.config.get("outputs", {}).get("score", {}).get("base", 60),
-                rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
-                metrics,
-            )
-            message = self._format_message(
-                rule,
-                market,
-                f"Total price {total:.3f} (< {threshold})",
-            )
-            book_snapshot = self._book_snapshot(options_meta, latest_ticks)
-            trade_legs = [
-                self._build_trade_leg(
-                    market["market_id"],
-                    option_id,
-                    "buy",
-                    _to_float(tick.get("price")),
-                    label=label_map.get(option_id, option_id),
-                )
-                for option_id, tick in latest_ticks.items()
-            ]
-            suggested_trade = self._trade_plan(
-                "basket_fill",
-                f"Buy each outcome to lock {edge*100:.2f}% edge (sum {total:.3f})",
-                trade_legs,
-                estimated_edge_bps=edge * 10000,
-            )
-            return {
-                "score": score,
-                "message": message,
-                "payload": {
-                    "total_price": total,
-                    "spread": spread,
-                    "liquidity": min_liquidity,
-                    "edge": edge,
-                    "estimated_edge_bps": edge * 10000,
-                    "book_snapshot": book_snapshot,
-                    "suggested_trade": suggested_trade,
-                },
-                "edge_score": edge,
-            }
-        return None
 
     def _rule_dutch_book(
         self,
@@ -583,10 +523,10 @@ class RulesEngine:
                         "suggested_trade": trade_plan,
                     },
                     "edge_score": abs(pct_change),
-                }
+            }
         return None
 
-    def _rule_trend_breakout(
+    def _rule_crypto_lead_lag(
         self,
         rule: Rule,
         market: dict[str, Any],
@@ -594,82 +534,361 @@ class RulesEngine:
         recent_ticks: list[dict[str, Any]],
         options_meta: list[dict[str, Any]],
     ) -> Optional[dict[str, Any]]:
-        params = rule.config.get("params", {})
-        window_secs = params.get("lookback_secs", 300)
-        pct_threshold = params.get("pct_breakout", 0.02)
-        min_points = params.get("min_points", 5)
-        min_liq = params.get("min_liquidity", 0.0)
-        now = datetime.now(timezone.utc)
-        filtered = [tick for tick in recent_ticks if (now - tick["ts"]).total_seconds() <= window_secs]
-        if not filtered:
+        symbol = self._map_crypto_symbol(market.get("title", ""))
+        if not symbol:
             return None
-        label_map = {opt["option_id"]: opt.get("label", opt["option_id"]) for opt in options_meta}
-        option_ids = {tick["option_id"] for tick in filtered if tick.get("option_id")}
-        for option_id in option_ids:
-            series = [tick for tick in filtered if tick["option_id"] == option_id]
-            if len(series) < min_points:
-                continue
-            avg_price = sum(_to_float(t.get("price")) for t in series) / max(len(series), 1)
-            if avg_price <= 0:
-                continue
-            latest = latest_ticks.get(option_id)
-            if not latest:
-                continue
-            liquidity = _to_float(latest.get("liquidity"))
-            if liquidity < min_liq:
-                continue
-            current_price = _to_float(latest.get("price"))
-            delta = (current_price - avg_price) / avg_price
-            if abs(delta) < pct_threshold:
-                continue
-            metrics = {
-                "velocity": abs(delta) * 100,
-                "time_to_end": (self._minutes_to_end(market) or 0) / 10,
-                "liquidity": liquidity / 10,
-            }
-            score = scoring.compute_score(
-                rule.config.get("outputs", {}).get("score", {}).get("base", 55),
-                rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
-                metrics,
-            )
-            direction = "up" if delta > 0 else "down"
-            label = label_map.get(option_id, option_id)
-            message = self._format_message(
+        feed = self.binance_cache.get_price_data(symbol)
+        if not feed:
+            return None
+        params = rule.config.get("params", {})
+        threshold = params.get("return_threshold", 0.003)
+        poly_drift_threshold = params.get("poly_drift_threshold", 0.002)
+        if abs(feed.return_1s) < threshold:
+            return None
+        option_id, label, tick = self._primary_option(latest_ticks, options_meta)
+        if not option_id:
+            return None
+        recent_price = None
+        for entry in recent_ticks:
+            if entry.get("option_id") == option_id:
+                recent_price = _to_float(entry.get("price"))
+                break
+        poly_price = _to_float(tick.get("price"))
+        if recent_price is not None and abs(poly_price - recent_price) > poly_drift_threshold:
+            return None
+        ts_field = tick.get("ts")
+        if isinstance(ts_field, datetime):
+            poly_ts = ts_field.timestamp()
+        elif isinstance(ts_field, (int, float)):
+            poly_ts = float(ts_field)
+        else:
+            poly_ts = time.time()
+        latency_gap = abs(feed.ts - poly_ts)
+        side = "buy" if feed.return_1s > 0 else "sell"
+        metrics = {
+            "momentum": abs(feed.return_1s) * 1000,
+            "liquidity": _to_float(tick.get("liquidity")) / 10,
+        }
+        score = scoring.compute_score(
+            rule.config.get("outputs", {}).get("score", {}).get("base", 55),
+            rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
+            metrics,
+        )
+        trade_plan = self._trade_plan(
+            "lead_lag_follow",
+            f"{symbol} 1s return {feed.return_1s*100:.2f}% vs Polymarket lag",
+            [
+                self._build_trade_leg(
+                    market["market_id"],
+                    option_id,
+                    side,
+                    poly_price,
+                    label=label,
+                )
+            ],
+            estimated_edge_bps=abs(feed.return_1s) * 10000,
+        )
+        return {
+            "score": score,
+            "message": self._format_message(
                 rule,
                 market,
-                f"{label} breakout {direction} {delta*100:.2f}%/{window_secs}s",
+                f"{symbol} lead-lag {feed.return_1s*100:.2f}%",
+            ),
+            "option_id": option_id,
+            "payload": {
+                "binance_price": feed.price,
+                "poly_price": poly_price,
+                "latency_gap": latency_gap,
+                "suggested_trade": trade_plan,
+            },
+            "edge_score": abs(feed.return_1s),
+        }
+
+    def _rule_temporal_arbitrage(
+        self,
+        rule: Rule,
+        market: dict[str, Any],
+        latest_ticks: dict[str, dict[str, Any]],
+        options_meta: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        snapshot = self._latest_snapshots.get(market["market_id"]) or {}
+        peer_ids = snapshot.get("synonym_ids") or []
+        if not peer_ids or not market.get("ends_at"):
+            return None
+        base_title = self._normalize_title(market.get("title", ""))
+        params = rule.config.get("params", {})
+        threshold = params.get("spread_gt", 0.02)
+        for peer_id in peer_ids:
+            peer_snapshot = self._latest_snapshots.get(peer_id)
+            if not peer_snapshot:
+                continue
+            peer_market = peer_snapshot.get("market")
+            if not peer_market or not peer_market.get("ends_at"):
+                continue
+            if self._normalize_title(peer_market.get("title", "")) != base_title:
+                continue
+            near_market = market
+            far_market = peer_market
+            if peer_market["ends_at"] < market["ends_at"]:
+                near_market, far_market = peer_market, market
+            near_ticks, near_opts = (
+                (latest_ticks, options_meta)
+                if near_market is market
+                else (
+                    peer_snapshot.get("ticks") or {},
+                    peer_snapshot.get("options") or [],
+                )
             )
-            book_snapshot = self._book_snapshot(options_meta, latest_ticks)
-            trade_side = "buy" if delta > 0 else "sell"
-            trade_plan = self._trade_plan(
-                "trend_breakout",
-                f"{label} trading {direction} {abs(delta)*100:.2f}% vs {window_secs}s average",
+            far_snapshot = (
+                peer_snapshot
+                if far_market is peer_market
+                else self._latest_snapshots.get(market["market_id"]) or {}
+            )
+            far_ticks = far_snapshot.get("ticks") or {}
+            far_opts = far_snapshot.get("options") or []
+            near_option = self._primary_option(near_ticks, near_opts)
+            far_option = self._primary_option(far_ticks, far_opts)
+            if not near_option[0] or not far_option[0]:
+                continue
+            gap = _to_float(near_option[2].get("price")) - _to_float(far_option[2].get("price"))
+            if gap <= threshold:
+                continue
+            trade = self._trade_plan(
+                "temporal_spread",
+                f"Sell {near_market['market_id']} buy {far_market['market_id']} gap {gap*100:.2f}%",
                 [
                     self._build_trade_leg(
-                        market["market_id"],
-                        option_id,
-                        trade_side,
-                        current_price,
-                        label=label,
-                    )
+                        near_market["market_id"],
+                        near_option[0],
+                        "sell",
+                        _to_float(near_option[2].get("price")),
+                        label=near_option[1],
+                    ),
+                    self._build_trade_leg(
+                        far_market["market_id"],
+                        far_option[0],
+                        "buy",
+                        _to_float(far_option[2].get("price")),
+                        label=far_option[1],
+                    ),
                 ],
-                estimated_edge_bps=abs(delta) * 10000,
+                estimated_edge_bps=gap * 10000,
             )
             return {
-                "score": score,
-                "message": message,
-                "option_id": option_id,
+                "score": 60 + gap * 500,
+                "message": self._format_message(
+                    rule,
+                    market,
+                    f"Temporal arbitrage {gap*100:.2f}%",
+                ),
                 "payload": {
-                    "avg_price": avg_price,
-                    "current_price": current_price,
-                    "delta": delta,
-                    "window_secs": window_secs,
-                    "book_snapshot": book_snapshot,
-                    "suggested_trade": trade_plan,
+                    "gap": gap,
+                    "near_market": near_market["market_id"],
+                    "far_market": far_market["market_id"],
+                    "suggested_trade": trade,
                 },
-                "edge_score": abs(delta),
+                "edge_score": gap,
             }
         return None
+
+    def _rule_order_book_imbalance(
+        self,
+        rule: Rule,
+        market: dict[str, Any],
+        latest_ticks: dict[str, dict[str, Any]],
+        recent_ticks: list[dict[str, Any]],
+        options_meta: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        snapshot = self._latest_snapshots.get(market["market_id"]) or {}
+        features = extract_features_realtime(
+            market,
+            latest_ticks,
+            recent_ticks,
+            snapshot.get("synonym_peers"),
+        )
+        if not features:
+            return None
+        imbalance = features.get("size_imbalance")
+        spread = features.get("spread")
+        if imbalance is None or spread is None:
+            return None
+        params = rule.config.get("params", {})
+        if abs(imbalance) <= params.get("imbalance_threshold", 0.8):
+            return None
+        if spread > params.get("max_spread", 0.02):
+            return None
+        option_id, label, tick = self._primary_option(latest_ticks, options_meta)
+        if not option_id:
+            return None
+        side = "buy" if imbalance > 0 else "sell"
+        price = _to_float(tick.get("price"))
+        trade = self._trade_plan(
+            "orderbook_follow",
+            f"Imbalance {imbalance:.2f} spread {spread:.3f}",
+            [
+                self._build_trade_leg(
+                    market["market_id"],
+                    option_id,
+                    side,
+                    price,
+                    label=label,
+                )
+            ],
+            estimated_edge_bps=(params.get("max_spread", 0.02) - spread) * 10000,
+        )
+        return {
+            "score": 55 + abs(imbalance) * 10,
+            "message": self._format_message(
+                rule,
+                market,
+                f"Order book imbalance {imbalance:.2f}",
+            ),
+            "option_id": option_id,
+            "payload": {
+                "size_imbalance": imbalance,
+                "spread": spread,
+                "suggested_trade": trade,
+            },
+            "edge_score": abs(imbalance),
+        }
+
+    def _rule_volatility_harvest(
+        self,
+        rule: Rule,
+        market: dict[str, Any],
+        latest_ticks: dict[str, dict[str, Any]],
+        recent_ticks: list[dict[str, Any]],
+        options_meta: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        if not self.ml_model:
+            return None
+        snapshot = self._latest_snapshots.get(market["market_id"]) or {}
+        features = extract_features_realtime(
+            market,
+            latest_ticks,
+            recent_ticks,
+            snapshot.get("synonym_peers"),
+        )
+        if not features:
+            return None
+        params = rule.config.get("params", {})
+        drop_threshold = params.get("drop_threshold", -0.05)
+        spread_limit = params.get("spread_limit", 0.1)
+        min_liq = params.get("min_liquidity", 1000.0)
+        mid_price = features.get("mid_price", 0.0)
+        price_velocity = features.get("price_velocity_10s", 0.0)
+        drop_pct = price_velocity / max(mid_price, 1e-6)
+        if drop_pct >= drop_threshold:
+            return None
+        if features.get("spread", 0.0) > spread_limit:
+            return None
+        top_option_id, label, top_tick = self._primary_option(latest_ticks, options_meta)
+        if not top_option_id or _to_float(top_tick.get("liquidity")) < min_liq:
+            return None
+        prob = self._predict_ml_probability(features)
+        if prob is None or prob < params.get("ml_min_confidence", 0.6):
+            return None
+        fair_value_gap = prob - mid_price
+        trade = self._trade_plan(
+            "volatility_harvest",
+            f"Drop {drop_pct*100:.2f}% but ML confidence {prob*100:.1f}%",
+            [
+                self._build_trade_leg(
+                    market["market_id"],
+                    top_option_id,
+                    "buy",
+                    mid_price,
+                    label=label,
+                )
+            ],
+            estimated_edge_bps=fair_value_gap * 10000,
+            confidence=prob,
+        )
+        return {
+            "score": 60 + prob * 20,
+            "message": self._format_message(
+                rule,
+                market,
+                f"Volatility harvest {drop_pct*100:.2f}% drop",
+            ),
+            "option_id": top_option_id,
+            "payload": {
+                "drop_pct": drop_pct,
+                "ml_confidence": prob,
+                "fair_value_gap": fair_value_gap,
+                "suggested_trade": trade,
+            },
+            "edge_score": abs(fair_value_gap),
+        }
+
+    def _rule_zombie_hunter(
+        self,
+        rule: Rule,
+        market: dict[str, Any],
+        latest_ticks: dict[str, dict[str, Any]],
+        recent_ticks: list[dict[str, Any]],
+        options_meta: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        if not self.ml_model:
+            return None
+        snapshot = self._latest_snapshots.get(market["market_id"]) or {}
+        features = extract_features_realtime(
+            market,
+            latest_ticks,
+            recent_ticks,
+            snapshot.get("synonym_peers"),
+        )
+        if not features:
+            return None
+        params = rule.config.get("params", {})
+        max_price = params.get("max_price", 0.03)
+        min_liq = params.get("min_liquidity", 500.0)
+        expiry_limit = params.get("expiry_days_limit", 7)
+        option_id, label, tick = self._primary_option(latest_ticks, options_meta)
+        if not option_id:
+            return None
+        price = _to_float(tick.get("price"))
+        liquidity = _to_float(tick.get("liquidity"))
+        if price > max_price or liquidity < min_liq:
+            return None
+        days_to_expiry = features.get("days_to_expiry", 0.0)
+        if days_to_expiry > expiry_limit:
+            return None
+        prob = self._predict_ml_probability(features)
+        if prob is None or prob >= params.get("ml_max_confidence", 0.01):
+            return None
+        trade = self._trade_plan(
+            "zombie_hunter",
+            f"Sell overpriced tail risk ({price:.3f}, model {prob:.3f})",
+            [
+                self._build_trade_leg(
+                    market["market_id"],
+                    option_id,
+                    "sell",
+                    price,
+                    label=label,
+                )
+            ],
+            estimated_edge_bps=(price - prob) * 10000,
+            confidence=1 - prob,
+        )
+        return {
+            "score": 50 + (1 - prob) * 25,
+            "message": self._format_message(
+                rule,
+                market,
+                f"Zombie Hunter: expiry {days_to_expiry:.1f}d",
+            ),
+            "option_id": option_id,
+            "payload": {
+                "days_to_expiry": days_to_expiry,
+                "implied_prob": price,
+                "model_prob": prob,
+                "suggested_trade": trade,
+            },
+            "edge_score": price - prob,
+        }
 
     def _rule_endgame(
         self,
@@ -748,116 +967,6 @@ class RulesEngine:
                     }
         return None
 
-    def _rule_synonym(
-        self,
-        rule: Rule,
-        groups: List[dict[str, Any]],
-        snapshots: dict[str, dict[str, Any]],
-    ) -> List[tuple[str, dict[str, Any]]]:
-        payloads: list[tuple[str, dict[str, Any]]] = []
-        min_size = rule.config.get("params", {}).get("group_min_size", 2)
-        gap_threshold = rule.config.get("params", {}).get("price_gap_gt", 0.02)
-        min_liq = rule.config.get("params", {}).get("min_liquidity", 0)
-        for group in groups:
-            members = []
-            for market_id in group.get("members", []):
-                snapshot = snapshots.get(market_id)
-                if not snapshot:
-                    continue
-                ticks = snapshot.get("ticks") or {}
-                if not ticks:
-                    continue
-                top_option_id, top_tick = max(
-                    ticks.items(),
-                    key=lambda item: _to_float(item[1].get("price")),
-                )
-                members.append(
-                    {
-                        "market_id": market_id,
-                        "option_id": top_option_id,
-                        "price": _to_float(top_tick.get("price")),
-                        "liquidity": _to_float(top_tick.get("liquidity")),
-                        "market": snapshot["market"],
-                        "book_snapshot": self._book_snapshot(snapshot.get("options") or [], ticks),
-                    }
-                )
-            if len(members) < min_size:
-                continue
-            leader = max(members, key=lambda x: x["price"])
-            laggard = min(members, key=lambda x: x["price"])
-            gap = leader["price"] - laggard["price"]
-            if gap < gap_threshold:
-                continue
-            if min(leader["liquidity"], laggard["liquidity"]) < min_liq:
-                continue
-            metrics = {
-                "gap": gap * 100,
-                "liquidity": min(leader["liquidity"], laggard["liquidity"]) / 10,
-                "time_to_end": (self._minutes_to_end(laggard["market"]) or 0) / 10,
-            }
-            score = scoring.compute_score(
-                rule.config.get("outputs", {}).get("score", {}).get("base", 60),
-                rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
-                metrics,
-            )
-            message = (
-                f"{group.get('name')} gap {gap*100:.2f}% "
-                f"({leader['market_id']} vs {laggard['market_id']})"
-            )
-            payloads.append(
-                (
-                    laggard["market_id"],
-                    {
-                        "score": score,
-                        "message": self._format_message(rule, laggard["market"], message),
-                        "payload": {
-                            "gap": gap,
-                            "leader": leader["market_id"],
-                            "laggard": laggard["market_id"],
-                            "estimated_edge_bps": gap * 10000,
-                            "comparables": [
-                                {
-                                    "market_id": leader["market_id"],
-                                    "price": leader["price"],
-                                    "liquidity": leader["liquidity"],
-                                    "role": "leader",
-                                },
-                                {
-                                    "market_id": laggard["market_id"],
-                                    "price": laggard["price"],
-                                    "liquidity": laggard["liquidity"],
-                                    "role": "laggard",
-                                },
-                            ],
-                            "book_snapshot": laggard.get("book_snapshot"),
-                            "suggested_trade": self._trade_plan(
-                                "pair_trade",
-                                f"Long {laggard['market_id']} vs short {leader['market_id']} gap {gap*100:.2f}%",
-                                [
-                                    self._build_trade_leg(
-                                        laggard["market_id"],
-                                        laggard.get("option_id", laggard["market_id"]),
-                                        "buy",
-                                        laggard["price"],
-                                        label="laggard",
-                                    ),
-                                    self._build_trade_leg(
-                                        leader["market_id"],
-                                        leader.get("option_id", leader["market_id"]),
-                                        "sell",
-                                        leader["price"],
-                                        label="leader",
-                                    ),
-                                ],
-                                estimated_edge_bps=gap * 10000,
-                            ),
-                        },
-                        "edge_score": gap,
-                    },
-                )
-            )
-        return payloads
-
     def _rule_cross_market(
         self,
         rule: Rule,
@@ -869,112 +978,131 @@ class RulesEngine:
         min_size = params.get("group_min_size", 2)
         gap_threshold = params.get("price_diff_threshold", 0.05)
         min_liq = params.get("min_liquidity", 0.0)
-        target_label = (params.get("target_label") or "").lower()
         for group in groups:
-            members: list[dict[str, Any]] = []
+            market_maps: list[tuple[str, dict[str, dict[str, Any]]]] = []
             for market_id in group.get("members", []):
                 snapshot = snapshots.get(market_id)
                 if not snapshot:
                     continue
-                option_id = self._select_option_by_label(snapshot.get("options") or [], target_label)
-                if not option_id:
+                labelled = self._labelled_options(snapshot)
+                if not labelled:
                     continue
-                tick = snapshot.get("ticks", {}).get(option_id)
-                if not tick:
-                    continue
-                price = _to_float(tick.get("price"))
-                liquidity = _to_float(tick.get("liquidity"))
-                if liquidity < min_liq:
-                    continue
-                members.append(
-                    {
-                        "market_id": market_id,
-                        "price": price,
-                        "liquidity": liquidity,
-                        "market": snapshot["market"],
-                        "option_id": option_id,
-                    }
-                )
-            if len(members) < min_size:
+                market_maps.append((market_id, labelled))
+            if len(market_maps) < min_size:
                 continue
-            leader = max(members, key=lambda x: x["price"])
-            laggard = min(members, key=lambda x: x["price"])
-            gap = leader["price"] - laggard["price"]
-            if gap < gap_threshold:
+            best: Optional[dict[str, Any]] = None
+            for idx in range(len(market_maps)):
+                market_a, options_a = market_maps[idx]
+                for jdx in range(idx + 1, len(market_maps)):
+                    market_b, options_b = market_maps[jdx]
+                    shared_labels = set(options_a.keys()) & set(options_b.keys())
+                    if not shared_labels:
+                        continue
+                    for label_key in shared_labels:
+                        option_a = options_a[label_key]
+                        option_b = options_b[label_key]
+                        liquidity = min(option_a["liquidity"], option_b["liquidity"])
+                        if liquidity < min_liq:
+                            continue
+                        gap = abs(option_a["price"] - option_b["price"])
+                        if gap < gap_threshold:
+                            continue
+                        if option_a["price"] >= option_b["price"]:
+                            leader, laggard = option_a, option_b
+                        else:
+                            leader, laggard = option_b, option_a
+                        candidate = {
+                            "gap": gap,
+                            "leader": leader,
+                            "laggard": laggard,
+                            "label": option_a["label"],
+                            "liquidity": liquidity,
+                        }
+                        if not best or candidate["gap"] > best["gap"]:
+                            best = candidate
+            if not best:
                 continue
+            minutes_to_end = self._minutes_to_end(best["laggard"]["market"]) or 0
+            leader_title = best["leader"]["market"].get("title") if best["leader"].get("market") else best["leader"]["market_id"]
+            laggard_title = (
+                best["laggard"]["market"].get("title") if best["laggard"].get("market") else best["laggard"]["market_id"]
+            )
             metrics = {
-                "gap": gap * 100,
-                "liquidity": min(leader["liquidity"], laggard["liquidity"]) / 10,
-                "time_to_end": (self._minutes_to_end(laggard["market"]) or 0) / 10,
+                "gap": best["gap"] * 100,
+                "liquidity": best["liquidity"] / 10,
+                "time_to_end": minutes_to_end / 10,
             }
             score = scoring.compute_score(
                 rule.config.get("outputs", {}).get("score", {}).get("base", 65),
                 rule.config.get("outputs", {}).get("score", {}).get("weights", {}),
                 metrics,
             )
+            label_text = best["label"]
             insight = (
-                f"{target_label or 'yes'} misprice {gap*100:.2f}% "
-                f"({leader['market_id']} vs {laggard['market_id']})"
+                f"{label_text} misprice {best['gap']*100:.2f}% "
+                f"({leader_title} vs {laggard_title})"
             )
-            laggard_snapshot = snapshots.get(laggard["market_id"]) or {}
+            laggard_snapshot = snapshots.get(best["laggard"]["market_id"]) or {}
             book_snapshot = self._book_snapshot(
                 laggard_snapshot.get("options") or [],
                 laggard_snapshot.get("ticks") or {},
             )
-            trade_legs = [
-                self._build_trade_leg(
-                    laggard["market_id"],
-                    laggard["option_id"],
-                    "buy",
-                    laggard["price"],
-                    label="laggard",
-                )
-            ]
-            trade_legs.append(
-                self._build_trade_leg(
-                    leader["market_id"],
-                    leader["option_id"],
-                    "sell",
-                    leader["price"],
-                    label="leader",
-                )
-            )
             trade_plan = self._trade_plan(
                 "cross_market_pair",
-                f"Buy {laggard['market_id']} {target_label or 'leg'} and sell {leader['market_id']} gap {gap*100:.2f}%",
-                trade_legs,
-                estimated_edge_bps=gap * 10000,
+                f"Buy {laggard_title} ({best['laggard']['market_id']}) {label_text} and sell "
+                f"{leader_title} ({best['leader']['market_id']}) {label_text} gap {best['gap']*100:.2f}%",
+                [
+                    self._build_trade_leg(
+                        best["laggard"]["market_id"],
+                        best["laggard"]["option_id"],
+                        "buy",
+                        best["laggard"]["price"],
+                        label=label_text,
+                    ),
+                    self._build_trade_leg(
+                        best["leader"]["market_id"],
+                        best["leader"]["option_id"],
+                        "sell",
+                        best["leader"]["price"],
+                        label=label_text,
+                    ),
+                ],
+                estimated_edge_bps=best["gap"] * 10000,
             )
             payloads.append(
                 (
-                    laggard["market_id"],
+                    best["laggard"]["market_id"],
                     {
                         "score": score,
-                        "message": self._format_message(rule, laggard["market"], insight),
+                        "message": self._format_message(rule, best["laggard"]["market"], insight),
                         "payload": {
-                            "gap": gap,
-                            "leader": leader["market_id"],
-                            "laggard": laggard["market_id"],
-                            "target_label": target_label,
-                            "estimated_edge_bps": gap * 10000,
+                            "gap": best["gap"],
+                            "leader": best["leader"]["market_id"],
+                            "laggard": best["laggard"]["market_id"],
+                            "target_label": label_text,
+                            "estimated_edge_bps": best["gap"] * 10000,
                             "comparables": [
-                                {
-                                    "market_id": leader["market_id"],
-                                    "price": leader["price"],
-                                    "liquidity": leader["liquidity"],
-                                    "role": "leader",
-                                },
-                                {
-                                    "market_id": laggard["market_id"],
-                                    "price": laggard["price"],
-                                    "liquidity": laggard["liquidity"],
-                                    "role": "laggard",
-                                },
+                    {
+                        "market_id": best["leader"]["market_id"],
+                        "title": leader_title,
+                        "price": best["leader"]["price"],
+                        "liquidity": best["leader"]["liquidity"],
+                        "role": "leader",
+                        "label": label_text,
+                    },
+                    {
+                        "market_id": best["laggard"]["market_id"],
+                        "title": laggard_title,
+                        "price": best["laggard"]["price"],
+                        "liquidity": best["laggard"]["liquidity"],
+                        "role": "laggard",
+                        "label": label_text,
+                    },
                             ],
                             "book_snapshot": book_snapshot,
                             "suggested_trade": trade_plan,
                         },
-                        "edge_score": gap,
+                        "edge_score": best["gap"],
                     },
                 )
             )
@@ -1082,15 +1210,65 @@ class RulesEngine:
             f"Detail: {base_url}/{market['market_id']}"
         )
 
-    def _select_option_by_label(self, options: list[dict[str, Any]], target: str) -> Optional[str]:
-        if not options:
-            return None
-        if target:
-            for opt in options:
-                label = (opt.get("label") or "").lower()
-                if target in label:
-                    return opt.get("option_id")
-        return options[0].get("option_id")
+    def _primary_option(
+        self,
+        ticks: dict[str, dict[str, Any]],
+        options_meta: Optional[list[dict[str, Any]]] = None,
+    ) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+        if not ticks:
+            return (None, None, {})
+        option_id, tick = max(ticks.items(), key=lambda item: _to_float(item[1].get("price")))
+        label = option_id
+        if options_meta:
+            label_map = {opt.get("option_id"): opt.get("label", opt.get("option_id")) for opt in options_meta}
+            label = label_map.get(option_id, label)
+        return option_id, label, tick
+
+    def _labelled_options(self, snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        ticks = snapshot.get("ticks") or {}
+        if not ticks:
+            return {}
+        options_meta = snapshot.get("options") or []
+        option_to_label: dict[str, str] = {}
+        for opt in options_meta:
+            option_id = opt.get("option_id")
+            if not option_id:
+                continue
+            label = (opt.get("label") or option_id or "").strip()
+            if not label:
+                continue
+            option_to_label[option_id] = label
+        entries: dict[str, dict[str, Any]] = {}
+        for option_id, tick in ticks.items():
+            label = option_to_label.get(option_id, str(option_id))
+            label_key = label.lower()
+            price = _to_float(tick.get("price"))
+            liquidity = _to_float(tick.get("liquidity"))
+            existing = entries.get(label_key)
+            if existing and liquidity <= existing["liquidity"]:
+                continue
+            entries[label_key] = {
+                "market_id": snapshot["market"]["market_id"],
+                "market": snapshot["market"],
+                "option_id": option_id,
+                "label": label,
+                "price": price,
+                "liquidity": liquidity,
+            }
+        return entries
+
+    def _map_crypto_symbol(self, title: str) -> Optional[str]:
+        lowered = title.lower()
+        if "bitcoin" in lowered or "btc" in lowered:
+            return "BTC"
+        if "ethereum" in lowered or "eth" in lowered:
+            return "ETH"
+        if "solana" in lowered or "sol" in lowered:
+            return "SOL"
+        return None
+
+    def _normalize_title(self, title: str) -> str:
+        return "".join(ch for ch in title.lower() if ch.isalpha() or ch.isspace())
 
     def _minutes_to_end(self, market: dict[str, Any]) -> Optional[float]:
         ends_at = market.get("ends_at")
@@ -1099,6 +1277,18 @@ class RulesEngine:
         now = datetime.now(timezone.utc)
         delta = (ends_at - now).total_seconds() / 60
         return max(delta, 0)
+
+    def _predict_ml_probability(self, feature_map: dict[str, Any]) -> Optional[float]:
+        if not self.ml_model:
+            return None
+        feature_names = getattr(getattr(self.ml_model, "model", None), "feature_name_", None)
+        if feature_names:
+            payload = {name: feature_map.get(name, 0.0) for name in feature_names}
+        else:
+            payload = feature_map
+        df = pd.DataFrame([payload]).fillna(0)
+        probs = self.ml_model.predict_proba_batch(df)
+        return probs[0] if probs else None
 
     def _is_market_enabled(self, market: dict[str, Any]) -> bool:
         if self.settings.data_source == "mock":

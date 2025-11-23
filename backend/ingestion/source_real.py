@@ -16,7 +16,8 @@ from .polymarket_client import MarketDataSource
 class RealPolymarketSource(MarketDataSource):
     BASE_URL = "https://gamma-api.polymarket.com"
     CLOB_URL = "https://clob.polymarket.com"
-    MAX_MARKETS = 40
+    MAX_MARKETS = 200
+    PAGE_SIZE = 100
     DETAIL_TTL = 120
     ORDERBOOK_TTL = 5
     MAX_RETRIES = 3
@@ -27,39 +28,70 @@ class RealPolymarketSource(MarketDataSource):
         *,
         gamma_client: Optional[httpx.AsyncClient] = None,
         clob_client: Optional[httpx.AsyncClient] = None,
+        max_markets: Optional[int] = None,
+        min_liquidity: float = 0.0,
+        min_volume_24h: float = 0.0,
     ) -> None:
         self._gamma = gamma_client or httpx.AsyncClient(timeout=10.0)
         self._clob = clob_client or httpx.AsyncClient(timeout=10.0)
         self._detail_cache: TTLCache[str, dict[str, Any]] = TTLCache(maxsize=512, ttl=self.DETAIL_TTL)
         self._orderbook_cache: TTLCache[str, dict[str, Any]] = TTLCache(maxsize=2048, ttl=self.ORDERBOOK_TTL)
         self._logger = get_logger("polymarket-real")
+        self._max_markets = max_markets or self.MAX_MARKETS
+        self._page_size = min(self.PAGE_SIZE, self._max_markets)
+        self._min_liquidity = max(0.0, float(min_liquidity))
+        self._min_volume_24h = max(0.0, float(min_volume_24h))
 
     async def aclose(self) -> None:
         await self._gamma.aclose()
         await self._clob.aclose()
 
     async def list_markets(self) -> List[Dict[str, Any]]:
-        payload = await self._request(
-            self._gamma,
-            "GET",
-            f"{self.BASE_URL}/markets",
-            params={"limit": self.MAX_MARKETS, "offset": 0, "closed": "false"},
-        )
-        data = payload.get("markets", payload) if isinstance(payload, dict) else payload
-        markets: list[dict[str, Any]] = []
-        for item in data[: self.MAX_MARKETS]:
-            markets.append(
-                {
-                    "market_id": str(item.get("id")),
-                    "title": item.get("question") or item.get("title"),
-                    "status": "closed" if item.get("closed") else "active",
-                    "starts_at": self._parse_iso(item.get("startDate")),
-                    "ends_at": self._parse_iso(item.get("endDate")),
-                    "platform": "polymarket",
-                    "tags": item.get("categories") or item.get("tags") or [],
-                }
+        raw_markets: list[dict[str, Any]] = []
+        offset = 0
+        while len(raw_markets) < self._max_markets:
+            payload = await self._request(
+                self._gamma,
+                "GET",
+                f"{self.BASE_URL}/markets",
+                params={"limit": self._page_size, "offset": offset, "closed": "false"},
             )
-        return markets
+            data = payload.get("markets", payload) if isinstance(payload, dict) else payload
+            if not isinstance(data, list):
+                break
+            raw_markets.extend(data)
+            offset += self._page_size
+            if len(data) < self._page_size:
+                break
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in raw_markets:
+            liquidity = self._to_float(item.get("liquidityClob") or item.get("liquidity"))
+            volume_24h = self._to_float(item.get("volume24hrClob") or item.get("volume24hr"))
+            open_interest = self._to_float(item.get("openInterest") or item.get("open_interest"))
+            if liquidity < self._min_liquidity or volume_24h < self._min_volume_24h:
+                continue
+            score = self._importance_score(liquidity, volume_24h, open_interest)
+            scored.append(
+                (
+                    score,
+                    {
+                        "market_id": str(item.get("id")),
+                        "title": item.get("question") or item.get("title"),
+                        "status": "closed" if item.get("closed") else "active",
+                        "starts_at": self._parse_iso(item.get("startDate")),
+                        "ends_at": self._parse_iso(item.get("endDate")),
+                        "platform": "polymarket",
+                        "tags": item.get("categories") or item.get("tags") or [],
+                        "liquidity": liquidity,
+                        "volume_24h": volume_24h,
+                        "open_interest": open_interest,
+                    },
+                )
+            )
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [payload for _, payload in scored[: self._max_markets]]
 
     async def list_options(self, market_id: str) -> List[Dict[str, Any]]:
         detail = await self._get_market_detail(market_id)
@@ -268,6 +300,10 @@ class RealPolymarketSource(MarketDataSource):
             except (TypeError, ValueError):
                 continue
         return floats
+
+    def _importance_score(self, liquidity: float, volume_24h: float, open_interest: float) -> float:
+        """给市场计算优先级分数，倾向于高流动性/高成交量."""
+        return liquidity * 2.0 + volume_24h * 0.5 + open_interest * 0.1
 
     def _to_float(self, value: Any) -> float:
         try:

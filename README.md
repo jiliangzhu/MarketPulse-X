@@ -7,7 +7,7 @@
 ## 1. Key Capabilities
 
 - **Real-time data ingestion** with asyncio + uvloop, concurrent polling, order-book caching, and Timescale dedupe writes.
-- **Rule DSL**: built-in `SUM_LT_1`, `SPIKE_DETECT`, `ENDGAME_SWEEP`, `SYNONYM_MISPRICE`, `DUTCH_BOOK_DETECT`, `CROSS_MARKET_MISPRICE`, `TREND_BREAKOUT`. Each signal carries `edge_score` and structured payloads.
+- **Rule DSL**: built-in `SPIKE_DETECT`, `ENDGAME_SWEEP`, `DUTCH_BOOK_DETECT`, `CROSS_MARKET_MISPRICE` + ML fusion. Each signal carries `edge_score`和结构化 payload，后续执行/风控可直接引用。
 - **Synonym grouping** from `configs/synonyms.yml` → `synonym_group*` tables, enabling cross-market arbitrage detection and “similar markets” UI hints.
 - **Semi-automatic execution**: FastAPI endpoints + React modal create intents, run limit/guardrail/circuit-breaker checks, and (in mock mode) auto-fill confirmed orders.
 - **Alerting & observability**: Telegram bot with dry-run fallback, Prometheus metrics (`/metrics`), structured JSON logs, and dashboard runbooks.
@@ -76,7 +76,7 @@ backend/
   utils/, settings.py   # logging, configuration
 configs/
   app.yaml              # ingestion / rules cadence, scheduler knobs
-  rules/*.yaml          # DSL definitions (7 built-in strategies)
+  rules/*.yaml          # DSL definitions (core arbitrage strategies)
   synonyms.yml          # keyword dictionaries for grouping
 frontend/               # React dashboard (App.tsx, SignalList, MarketList, ExecutionModal...)
 migrations/             # SQL migrations (Timescale + execution + KPI + edge_score)
@@ -181,14 +181,12 @@ Once services are up:
 ## 10. Rule Engine & Execution Flow
 
 1. **Ingestion** polls Gamma `/markets`, `/markets/{id}` + CLOB `/book?token_id=...`. Order books are cached (TTL 5s) to minimise load; ticks are deduped before insert.
-2. **Rules Engine** loads YAML DSL, fetches latest and recent ticks per market, then evaluates:
-   - `SUM_LT_1`: sum of outcome prices < threshold.
-   - `SPIKE_DETECT`: pct change > X% in Y seconds.
-   - `ENDGAME_SWEEP`: near-expiry price spikes with volume z-score.
-   - `SYNONYM_MISPRICE`: within synonym groups price gap > threshold.
-   - `DUTCH_BOOK_DETECT`: total outcome price < 0.995 (edge = 1 - sum).
-   - `CROSS_MARKET_MISPRICE`: same outcome across markets differs by > threshold.
-   - `TREND_BREAKOUT`: current price deviates from rolling mean > pct.
+2. **Rules Engine** loads YAML DSL, fetches最新ticks +5分钟窗口，再评估以下核心规则：
+   - `SPIKE_DETECT`：在指定 window 内的价格变动超过阈值。
+   - `ENDGAME_SWEEP`：临近收盘、高赔率配合成交量飙升的机会。
+   - `DUTCH_BOOK_DETECT`：篮子概率和 < 阈值的 dutch book 机会。
+   - `CROSS_MARKET_MISPRICE`：同一 outcome（标签匹配）在不同市场出现明显价差。
+   - **ML Fusion**：LightGBM 对实时特征推断套利概率，再与规则信号融合成 `edge_score`。
 3. **Signal persistence**: each signal writes to DB with `edge_score`, `payload_json`, and audit logs; KPI daily aggregates update concurrently.
 4. **Alerting**: Telegram notifier debounces duplicate alerts and falls back to dry-run logging if disabled.
 5. **Execution**: UI or API can create intents for P1/P2 signals. Intent creation uses rule-specific heuristics (basket sizing, slippage clamps). Confirmation triggers limit + guardrail checks; mock mode marks intents as filled.

@@ -26,7 +26,7 @@ class DummyNotifier:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backtest MarketPulse-X rules")
-    parser.add_argument("--rule", required=True, help="Rule type, e.g. SUM_LT_1")
+    parser.add_argument("--rule", required=True, help="Rule type, e.g. CROSS_MARKET_MISPRICE")
     parser.add_argument("--start", required=True, help="Start timestamp, e.g. 2024-01-01T00:00:00Z")
     parser.add_argument("--end", required=True, help="End timestamp")
     parser.add_argument("--speed", type=float, default=0, help="Replay speed multiplier (0 disables sleep)")
@@ -226,8 +226,6 @@ def infer_side(rule: Rule, payload: dict[str, Any]) -> str:
         return "buy" if payload["delta"] >= 0 else "sell"
     if rule_type in {"SPIKE_DETECT"} and payload.get("window_secs"):
         return "buy" if payload.get("pct_change", 0) >= 0 else "sell"
-    if rule_type in {"TREND_BREAKOUT"}:
-        return "buy" if payload.get("delta", 0) >= 0 else "sell"
     return "buy"
 
 

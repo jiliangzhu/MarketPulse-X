@@ -29,8 +29,17 @@ def parse_args() -> argparse.Namespace:
 async def fetch_ticks(db: Database, start: datetime, end: datetime) -> pd.DataFrame:
     rows = await db.fetch(
         """
-        SELECT ts, market_id, option_id, price, volume, best_bid, best_ask, liquidity
-        FROM tick
+        SELECT t.ts,
+               t.market_id,
+               t.option_id,
+               t.price,
+               t.volume,
+               t.best_bid,
+               t.best_ask,
+               t.liquidity,
+               m.ends_at
+        FROM tick t
+        JOIN market m ON m.market_id = t.market_id
         WHERE ts BETWEEN $1 AND $2
         ORDER BY ts
         """,
@@ -62,6 +71,7 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
         if col in ticks.columns:
             ticks[col] = pd.to_numeric(ticks[col], errors="coerce")
     ticks["ts"] = pd.to_datetime(ticks["ts"], utc=True)
+    ticks["ends_at"] = pd.to_datetime(ticks["ends_at"], utc=True, errors="coerce")
     ticks.sort_values("ts", inplace=True)
     ticks["mid_price"] = ticks[["best_bid", "best_ask"]].mean(axis=1, skipna=True).fillna(ticks["price"])
     ticks["spread"] = (ticks["best_ask"] - ticks["best_bid"]).abs().fillna(0)
@@ -77,6 +87,20 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
     ticks["price_velocity_10s"] = (
         ticks.groupby("market_id")["mid_price"].transform(lambda s: s.diff().fillna(0))
     )
+    ticks["volatility_5m"] = (
+        ticks.groupby("market_id")
+        .apply(
+            lambda g: g.set_index("ts")["mid_price"]
+            .rolling("5min")
+            .std()
+            .reset_index(level=0, drop=True)
+        )
+        .reset_index(level=0, drop=True)
+    )
+    ticks["volatility_5m"] = ticks["volatility_5m"].fillna(0)
+    ticks["days_to_expiry"] = (
+        (ticks["ends_at"] - ticks["ts"]).dt.total_seconds().div(86400).clip(lower=0).fillna(0)
+    )
     ticks["feature_ts"] = ticks["ts"]
     return ticks[
         [
@@ -88,6 +112,8 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
             "size_imbalance",
             "zscore_spread_5min",
             "price_velocity_10s",
+            "volatility_5m",
+            "days_to_expiry",
         ]
     ]
 

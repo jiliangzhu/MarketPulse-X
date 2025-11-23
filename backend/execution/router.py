@@ -67,15 +67,7 @@ async def create_intent(
     side = request_payload.side or (primary_leg.get("side") if primary_leg else ("buy" if signal.get("level") == "P1" else "sell"))
     # 根据风控滑点对价格做预夹
     allowed_slip = ref_price * (settings.exec_slippage_bps / 10000)
-    if rule_type == "SUM_LT_1":
-        qty = request_payload.qty_override or max(len(latest), 1)
-        total_price = float((signal.get("payload_json") or {}).get("total_price") or ref_price)
-        avg_leg_price = total_price / max(len(latest), 1)
-        # 用平均腿价，但不超过滑点上限
-        candidate = min(0.99, avg_leg_price)
-        limit_price = request_payload.limit_price_override or candidate
-        side = "buy"
-    elif rule_type == "ENDGAME_SWEEP":
+    if rule_type == "ENDGAME_SWEEP":
         qty = request_payload.qty_override or 1
         limit_price = request_payload.limit_price_override or min(0.99, ref_price)
         side = "buy"

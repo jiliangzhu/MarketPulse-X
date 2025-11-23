@@ -9,12 +9,18 @@ groups:
       - "516717"  # Nuclear detonation
       - "516721"  # Netanyahu out
       - "516716"  # Khamenei out
+      - "522056"  # Ukraine agrees not to join NATO
+      - "521103"  # NATO/EU troops fighting in Ukraine
   - name: "2025 Stablecoin & BTC Stress"
     explicit:
       - "516713"  # USDT depeg
       - "516712"  # Tether insolvent
       - "516862"  # BTC 250k
       - "516861"  # BTC 1M
+      - "516863"  # BTC 200k
+      - "516864"  # BTC 150k
+      - "516865"  # BTC 130k
+      - "516872"  # BTC dip to 50k
   - name: "2025 US Macro & Fed Path"
     explicit:
       - "516710"  # US recession
@@ -22,9 +28,40 @@ groups:
       - "516730"  # 7 rate cuts
       - "516731"  # 6 rate cuts
       - "516706"  # Fed rate hike
+      - "516727"  # 4 rate cuts
+      - "516726"  # 3 rate cuts
+      - "516725"  # 2 rate cuts
+      - "516729"  # 8+ rate cuts
   - name: "2025 MegaCap Leadership"
     explicit:
       - "516841"  # Andy Jassy out
       - "516842"  # Brian Armstrong out
       - "516838"  # Tim Cook out
       - "516837"  # Sundar Pichai out
+      - "516840"  # Dan Clancy out (Twitch)
+      - "516847"  # Sam Altman out (OpenAI)
+  - name: "2025 MicroStrategy Stress"
+    explicit:
+      - "525227"  # MicroStrategy margin call
+      - "525172"  # MicroStrategy bankruptcy
+      - "525228"  # MicroStrategy forced liquidation
+      - "516926"  # MicroStrategy sells BTC
+  - name: "2025 Asian Flashpoints"
+    explicit:
+      - "520992"  # North Korea x South Korea clash
+      - "521019"  # China x Taiwan clash
+      - "521031"  # China x Philippines clash
+      - "521029"  # China x India clash
+  - name: "2025 Leadership Turnover (Global)"
+    explicit:
+      - "516947"  # Maduro out
+      - "521532"  # Starmer out
+      - "521534"  # Milei out
+      - "521536"  # Meloni out
+      - "517231"  # Macron out
+  - name: "2025 Box Office Race"
+    explicit:
+      - "518509"  # Wicked opening weekend
+      - "517012"  # Wicked top grossing
+      - "518506"  # Avatar Fire and Ash
+      - "518508"  # Zootopia 2 opening weekend

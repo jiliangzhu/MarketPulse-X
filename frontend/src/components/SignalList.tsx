@@ -102,6 +102,10 @@ export default function SignalList() {
     );
   };
 
+  const renderTitle = (signal: SignalRecord) => {
+    return signal.payload_json?.market_title ?? signal.reason ?? signal.market_id;
+  };
+
   const renderBook = (signal: SignalRecord) => {
     const book = signal.payload_json?.book_snapshot;
     if (!book || book.length === 0) return null;
@@ -132,7 +136,7 @@ export default function SignalList() {
             </div>
             <span className="signal-score">{renderEdge(signal)}</span>
           </div>
-          <div className="signal-title">{signal.reason ?? signal.market_id}</div>
+          <div className="signal-title">{renderTitle(signal)}</div>
           <div className="signal-meta">
             <span>{new Date(signal.created_at).toLocaleTimeString()}</span>
             {signal.confidence !== undefined && (

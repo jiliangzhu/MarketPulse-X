@@ -1,0 +1,15 @@
+name: "Temporal Arbitrage"
+type: "TEMPORAL_ARBITRAGE"
+enabled: true
+scope: {}
+params:
+  spread_gt: 0.02
+outputs:
+  level: "P1"
+  score:
+    base: 60
+    weights:
+      gap: 0.5
+      time_to_end: 0.2
+dedupe:
+  cooldown_secs: 300

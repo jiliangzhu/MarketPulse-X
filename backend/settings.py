@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     ml_fusion_confidence_weight: float = 1.0
     ml_fusion_rule_bonus: float = 20.0
 
+    # Market ingestion controls
+    market_bootstrap_limit: int = 200
+    market_min_liquidity: float = 0.0
+    market_min_volume_24h: float = 0.0
+
     config_app_path: Path = Path("configs/app.yaml")
     config_rules_path: Path = Path("configs/rules")
     config_synonyms_path: Path = Path("configs/synonyms.yml")

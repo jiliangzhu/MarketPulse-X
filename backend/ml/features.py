@@ -18,8 +18,9 @@ def extract_features_realtime(
     best_ask = _to_float(top_tick.get("best_ask"))
     mid_price = _mid(best_bid, best_ask, _to_float(top_tick.get("price")))
     spread = (best_ask - best_bid) if (best_ask and best_bid) else 0.0
-    best_bid_size = _to_float(top_tick.get("volume"))
-    best_ask_size = _to_float(top_tick.get("volume"))
+    volume = _to_float(top_tick.get("volume"))
+    best_bid_size = volume
+    best_ask_size = volume
     size_imbalance = 0.0
     if best_bid_size or best_ask_size:
         size_imbalance = (best_bid_size - best_ask_size) / max(best_bid_size + best_ask_size, 1e-6)
@@ -28,10 +29,13 @@ def extract_features_realtime(
     price_velocity = _price_velocity(recent_ticks, window_secs=10)
     time_to_expiry = _time_to_expiry_minutes(market)
     synonym_delta = _synonym_price_delta(mid_price, synonym_peers)
+    volatility_5m = _price_volatility(recent_ticks)
+    days_to_expiry = _days_to_expiry(market)
 
     features = {
         "mid_price": mid_price,
         "spread": spread,
+        "volume": volume,
         "best_bid_size": best_bid_size,
         "best_ask_size": best_ask_size,
         "size_imbalance": size_imbalance,
@@ -39,6 +43,8 @@ def extract_features_realtime(
         "price_velocity_10s": price_velocity,
         "time_to_expiry_minutes": time_to_expiry,
         "synonym_price_delta_zscore": synonym_delta,
+        "volatility_5m": volatility_5m,
+        "days_to_expiry": days_to_expiry,
     }
     if any(value is None for value in features.values()):
         return None
@@ -108,6 +114,14 @@ def _time_to_expiry_minutes(market: dict[str, Any]) -> float:
     return max(delta, 0.0)
 
 
+def _days_to_expiry(market: dict[str, Any]) -> float:
+    ends_at = market.get("ends_at")
+    if not isinstance(ends_at, datetime):
+        return 0.0
+    delta = (ends_at - datetime.now(timezone.utc)).total_seconds() / 86400
+    return max(delta, 0.0)
+
+
 def _synonym_price_delta(mid_price: float, peers: List[dict[str, Any]] | None) -> float:
     if not peers:
         return 0.0
@@ -122,3 +136,17 @@ def _synonym_price_delta(mid_price: float, peers: List[dict[str, Any]] | None) -
         std = 1.0
     delta = mid_price - avg_peer
     return delta / std
+
+
+def _price_volatility(recent_ticks: List[dict[str, Any]]) -> float:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=5)
+    prices: list[float] = []
+    for tick in recent_ticks:
+        ts = tick.get("ts")
+        if not isinstance(ts, datetime) or ts < cutoff:
+            continue
+        prices.append(_to_float(tick.get("price")))
+    if len(prices) < 2:
+        return 0.0
+    return stdev(prices)
