@@ -75,7 +75,11 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
     ticks.sort_values("ts", inplace=True)
     ticks["mid_price"] = ticks[["best_bid", "best_ask"]].mean(axis=1, skipna=True).fillna(ticks["price"])
     ticks["spread"] = (ticks["best_ask"] - ticks["best_bid"]).abs().fillna(0)
+    ticks["volume"] = ticks["volume"].fillna(0)
+    ticks["best_bid_size"] = ticks["volume"]
+    ticks["best_ask_size"] = ticks["volume"]
     ticks["size_imbalance"] = 0.0
+
     def _spread_zscore(group: pd.Series) -> pd.Series:
         mean = group.rolling(50, min_periods=1).mean()
         std = group.rolling(50, min_periods=1).std().replace(0, 1).fillna(1)
@@ -87,20 +91,18 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
     ticks["price_velocity_10s"] = (
         ticks.groupby("market_id")["mid_price"].transform(lambda s: s.diff().fillna(0))
     )
+    ticks.set_index("ts", inplace=True)
     ticks["volatility_5m"] = (
-        ticks.groupby("market_id")
-        .apply(
-            lambda g: g.set_index("ts")["mid_price"]
-            .rolling("5min")
-            .std()
-            .reset_index(level=0, drop=True)
-        )
-        .reset_index(level=0, drop=True)
+        ticks.groupby("market_id")["mid_price"].rolling("5min").std().fillna(0).reset_index(level=0, drop=True)
     )
-    ticks["volatility_5m"] = ticks["volatility_5m"].fillna(0)
+    ticks.reset_index(inplace=True)
+    ticks["time_to_expiry_minutes"] = (
+        (ticks["ends_at"] - ticks["ts"]).dt.total_seconds().div(60).clip(lower=0).fillna(0)
+    )
     ticks["days_to_expiry"] = (
         (ticks["ends_at"] - ticks["ts"]).dt.total_seconds().div(86400).clip(lower=0).fillna(0)
     )
+    ticks["synonym_price_delta_zscore"] = 0.0
     ticks["feature_ts"] = ticks["ts"]
     return ticks[
         [
@@ -109,9 +111,13 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
             "mid_price",
             "spread",
             "volume",
+             "best_bid_size",
+             "best_ask_size",
             "size_imbalance",
             "zscore_spread_5min",
             "price_velocity_10s",
+            "time_to_expiry_minutes",
+            "synonym_price_delta_zscore",
             "volatility_5m",
             "days_to_expiry",
         ]

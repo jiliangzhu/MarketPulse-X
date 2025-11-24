@@ -321,6 +321,10 @@ class RulesEngine:
             return self._rule_temporal_arbitrage(rule, market, latest_ticks, options_meta)
         if rule.type == "ORDER_BOOK_IMBALANCE":
             return self._rule_order_book_imbalance(rule, market, latest_ticks, recent_ticks, options_meta)
+        if rule.type == "VOLATILITY_HARVEST":
+            return self._rule_volatility_harvest(rule, market, latest_ticks, recent_ticks, options_meta)
+        if rule.type == "ZOMBIE_HUNTER":
+            return self._rule_zombie_hunter(rule, market, latest_ticks, recent_ticks, options_meta)
         if rule.type == "CROSS_MARKET_MISPRICE":
             return None
         return None
