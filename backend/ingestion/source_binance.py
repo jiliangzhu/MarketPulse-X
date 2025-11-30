@@ -32,7 +32,7 @@ class BinancePriceCache:
         "ethusdt": "ETH",
         "solusdt": "SOL",
     }
-    WS_URI: ClassVar[str] = "wss://stream.binance.com:9443/ws"
+    WS_URI: ClassVar[str] = "wss://stream.binance.us:9443/ws"
     _instance: ClassVar[Optional["BinancePriceCache"]] = None
 
     def __init__(self) -> None:
@@ -65,16 +65,18 @@ class BinancePriceCache:
                 await asyncio.sleep(5)
                 continue
             try:
+                self.logger.info("binance-feed-connecting", extra={"uri": self.WS_URI})
                 async with websockets.connect(
                     self.WS_URI,
                     ping_interval=20,
                     ping_timeout=20,
                 ) as ws:
                     await ws.send(subscribe_payload)
+                    self.logger.info("binance-feed-subscribed", extra={"uri": self.WS_URI})
                     async for raw_msg in ws:
                         await self._handle_message(raw_msg)
             except Exception as exc:  # pragma: no cover - 网络异常兜底
-                self.logger.warning("binance-feed-retry", extra={"error": str(exc)})
+                self.logger.warning("binance-feed-retry", extra={"error": repr(exc), "uri": self.WS_URI})
                 await asyncio.sleep(1)
 
     async def _handle_message(self, raw_msg: str) -> None:

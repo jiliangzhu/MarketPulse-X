@@ -19,8 +19,12 @@ def extract_features_realtime(
     mid_price = _mid(best_bid, best_ask, _to_float(top_tick.get("price")))
     spread = (best_ask - best_bid) if (best_ask and best_bid) else 0.0
     volume = _to_float(top_tick.get("volume"))
-    best_bid_size = volume
-    best_ask_size = volume
+    best_bid_size = _to_float(top_tick.get("best_bid_size"))
+    best_ask_size = _to_float(top_tick.get("best_ask_size"))
+    if best_bid_size == 0 and best_ask_size == 0:
+        fallback = _to_float(top_tick.get("liquidity")) or volume
+        best_bid_size = fallback
+        best_ask_size = volume
     size_imbalance = 0.0
     if best_bid_size or best_ask_size:
         size_imbalance = (best_bid_size - best_ask_size) / max(best_bid_size + best_ask_size, 1e-6)

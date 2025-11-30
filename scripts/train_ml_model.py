@@ -10,7 +10,7 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from backend.db import Database
@@ -22,13 +22,31 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ML model for MarketPulse-X")
     parser.add_argument("--start", required=False, help="Start ISO timestamp")
     parser.add_argument("--end", required=False, help="End ISO timestamp")
+    parser.add_argument("--days-back", type=int, default=7, help="回溯天数，未提供 start 时生效")
+    parser.add_argument("--max-ticks", type=int, default=0, help="可选的 tick 限制，0 表示不限")
     parser.add_argument("--output", type=Path, default=None, help="Override model output path")
+    parser.add_argument(
+        "--threshold-grid",
+        type=str,
+        default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50",
+        help="逗号分隔的阈值列表，用于 PR 掃描",
+    )
+    parser.add_argument(
+        "--metrics-path",
+        type=Path,
+        default=Path("reports/train_metrics.csv"),
+        help="保存阈值扫描结果的路径",
+    )
     return parser.parse_args()
 
 
-async def fetch_ticks(db: Database, start: datetime, end: datetime) -> pd.DataFrame:
+async def fetch_ticks(db: Database, start: datetime, end: datetime, max_rows: int = 0) -> pd.DataFrame:
+    limit_clause = "LIMIT $3" if max_rows and max_rows > 0 else ""
+    params: list[Any] = [start, end]
+    if limit_clause:
+        params.append(max_rows)
     rows = await db.fetch(
-        """
+        f"""
         SELECT t.ts,
                t.market_id,
                t.option_id,
@@ -42,9 +60,9 @@ async def fetch_ticks(db: Database, start: datetime, end: datetime) -> pd.DataFr
         JOIN market m ON m.market_id = t.market_id
         WHERE ts BETWEEN $1 AND $2
         ORDER BY ts
+        {limit_clause}
         """,
-        start,
-        end,
+        *params,
     )
     return pd.DataFrame([dict(row) for row in rows])
 
@@ -153,7 +171,23 @@ def align_labels(features: pd.DataFrame, signals: pd.DataFrame) -> pd.DataFrame:
     return features.drop(columns=["feature_ts"])
 
 
-def train_model(features: pd.DataFrame, model_path: Path) -> None:
+def _scan_thresholds(y_true: pd.Series, y_proba: np.ndarray, grid: list[float]) -> pd.DataFrame:
+    """阈值扫描，返回精确率、召回、F1 及 AUC 供参考。"""
+    rows = []
+    auc = roc_auc_score(y_true, y_proba) if len(np.unique(y_true)) > 1 else float("nan")
+    for thr in grid:
+        pred = (y_proba >= thr).astype(int)
+        tp = ((pred == 1) & (y_true == 1)).sum()
+        fp = ((pred == 1) & (y_true == 0)).sum()
+        fn = ((pred == 0) & (y_true == 1)).sum()
+        precision = tp / (tp + fp + 1e-9)
+        recall = tp / (tp + fn + 1e-9)
+        f1 = 2 * precision * recall / (precision + recall + 1e-9)
+        rows.append({"threshold": thr, "precision": precision, "recall": recall, "f1": f1, "auc": auc})
+    return pd.DataFrame(rows)
+
+
+def train_model(features: pd.DataFrame, model_path: Path, threshold_grid: list[float], metrics_path: Path) -> None:
     logger = get_logger("ml-train")
     if features.empty:
         logger.warning("No training data available")
@@ -174,8 +208,23 @@ def train_model(features: pd.DataFrame, model_path: Path) -> None:
     )
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
+    proba = model.predict_proba(X_test)[:, 1]
     report = classification_report(y_test, preds, zero_division=0)
-    logger.info("ml-training-report", extra={"report": report})
+    auc = roc_auc_score(y_test, proba) if len(np.unique(y_test)) > 1 else float("nan")
+    scan_df = _scan_thresholds(pd.Series(y_test), proba, threshold_grid)
+    best_row = scan_df.sort_values("f1", ascending=False).iloc[0]
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    scan_df.to_csv(metrics_path, index=False)
+    logger.info(
+        "ml-training-report",
+        extra={
+            "report": report,
+            "auc": auc,
+            "best_threshold": best_row["threshold"],
+            "best_f1": best_row["f1"],
+            "best_recall": best_row["recall"],
+        },
+    )
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, model_path)
     logger.info("ml-model-saved", extra={"path": str(model_path)})
@@ -189,8 +238,9 @@ async def main() -> None:
     db = Database(settings.database_dsn)
     await db.connect()
     end = datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else datetime.now(timezone.utc)
-    start = datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start else end - timedelta(days=7)
-    ticks = await fetch_ticks(db, start, end)
+    default_start = end - timedelta(days=args.days_back)
+    start = datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start else default_start
+    ticks = await fetch_ticks(db, start, end, max_rows=args.max_ticks)
     signals = await fetch_signals(db, start, end)
     await db.disconnect()
     features = build_features(ticks)
@@ -198,7 +248,8 @@ async def main() -> None:
     if "market_id" in dataset.columns:
         dataset = dataset.drop(columns=["market_id"])
     output_path = args.output or settings.ml_model_path
-    train_model(dataset, output_path)
+    grid = [float(x) for x in args.threshold_grid.split(",") if x]
+    train_model(dataset, output_path, grid, args.metrics_path)
     logger.info("ml-training-done")
 
 

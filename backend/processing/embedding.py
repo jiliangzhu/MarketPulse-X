@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import List
 
@@ -21,10 +22,16 @@ class EmbeddingModel:
         self.logger = get_logger("embedding-model")
         self.dim = 384
         self._model = None
+        offline = os.getenv("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}
+        if offline:
+            self.logger.warning("embedding-offline-mode", extra={"model": model_name})
+            SentenceTransformer_local = None
+        else:
+            SentenceTransformer_local = SentenceTransformer
         if SentenceTransformer is not None:
             try:
                 self.logger.info("loading-embedding-model", extra={"model": model_name})
-                self._model = SentenceTransformer(model_name)
+                self._model = (SentenceTransformer_local or SentenceTransformer)(model_name)
                 test_vector = self._model.encode("MarketPulse-X")
                 if np is not None and isinstance(test_vector, np.ndarray):
                     self.dim = len(test_vector)

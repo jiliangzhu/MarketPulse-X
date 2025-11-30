@@ -51,13 +51,13 @@ async def main() -> None:
             await db.disconnect()
         return
 
-    http_source = RealPolymarketSource(
-        max_markets=settings.market_bootstrap_limit,
-        min_liquidity=settings.market_min_liquidity,
-        min_volume_24h=settings.market_min_volume_24h,
-    )
+    # Real 数据源目前不接受筛选参数，直接初始化
+    http_source = RealPolymarketSource()
     logger.info("Bootstrapping asset list via HTTP...")
     markets = await http_source.list_markets()
+    # 限制启动时的市场数量，避免全量拉取导致超时
+    if settings.market_bootstrap_limit and len(markets) > settings.market_bootstrap_limit:
+        markets = markets[: settings.market_bootstrap_limit]
     asset_to_market_map: dict[str, str] = {}
     for market in markets:
         await markets_repo.upsert_market(db, market)

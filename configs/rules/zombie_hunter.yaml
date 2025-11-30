@@ -3,10 +3,10 @@ type: "ZOMBIE_HUNTER"
 enabled: true
 scope: {}
 params:
-  max_price: 0.03
-  min_liquidity: 500
-  expiry_days_limit: 7
-  ml_max_confidence: 0.01
+  max_price: 0.05
+  min_liquidity: 300
+  expiry_days_limit: 14
+  ml_max_confidence: 0.05
 outputs:
   level: "P2"
   score:

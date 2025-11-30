@@ -33,8 +33,8 @@ class Settings(BaseSettings):
 
     # ML Model Inference Settings
     ml_enabled: bool = False
-    ml_model_path: Path = Path("models/lgbm_v1.pkl")
-    ml_confidence_threshold: float = 0.7
+    ml_model_path: Path = Path("models/gboost_latest.pkl")
+    ml_confidence_threshold: float = 0.20
     ml_inference_interval_secs: float = 5.0
     ml_fusion_confidence_weight: float = 1.0
     ml_fusion_rule_bonus: float = 20.0

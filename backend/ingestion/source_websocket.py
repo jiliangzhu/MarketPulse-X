@@ -120,6 +120,8 @@ class WebSocketMarketSource:
                 price = self._to_float(change.get("price"))
                 best_bid = self._to_float(change.get("best_bid"))
                 best_ask = self._to_float(change.get("best_ask"))
+                best_bid_size = self._to_float(change.get("best_bid_size"))
+                best_ask_size = self._to_float(change.get("best_ask_size"))
                 if price == 0 and best_bid and best_ask:
                     price = (best_bid + best_ask) / 2
                 liquidity = self._derive_liquidity(change)
@@ -131,6 +133,8 @@ class WebSocketMarketSource:
                     "price": price or None,
                     "best_bid": best_bid or None,
                     "best_ask": best_ask or None,
+                    "best_bid_size": best_bid_size or None,
+                    "best_ask_size": best_ask_size or None,
                     "liquidity": liquidity,
                     "volume": volume or None,
                 }

@@ -4,10 +4,10 @@ enabled: true
 scope: {}
 params:
   window_secs: 10
-  drop_threshold: -0.05
-  spread_limit: 0.1
-  min_liquidity: 1000
-  ml_min_confidence: 0.6
+  drop_threshold: -0.03
+  spread_limit: 0.12
+  min_liquidity: 500
+  ml_min_confidence: 0.4
 outputs:
   level: "P1"
   score:
