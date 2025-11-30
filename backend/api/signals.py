@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, Query
 
 from backend.db import Database
-from backend.deps import get_db, get_app_settings
+from backend.deps import get_db, get_app_settings, require_admin_token
 from backend.repo import signals_repo
 from backend.schemas import RuleUploadSchema, SignalSchema
 from backend.settings import Settings
-import yaml
+from backend.utils.rules import validate_rule_payload
 
 router = APIRouter(prefix="/api", tags=["signals"])
 
@@ -27,19 +27,14 @@ async def list_signals(
     return [SignalSchema(**row) for row in rows]
 
 
-@router.post("/rules")
+@router.post("/rules", dependencies=[Depends(require_admin_token)])
 async def upload_rule(
     payload: RuleUploadSchema,
-    request: Request,
     db: Database = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ):
-    token = request.headers.get("x-api-key")
-    if settings.admin_api_token and token != settings.admin_api_token:
-        raise HTTPException(status_code=401, detail="invalid token")
     rule_yaml = payload.dsl
-    rule_dict = yaml.safe_load(rule_yaml)
-    rule_dict = rule_dict or {}
+    rule_dict = validate_rule_payload(rule_yaml, settings.rule_payload_max_bytes)
     rule_dict["raw_yaml"] = rule_yaml
     rule_id = await signals_repo.upsert_rule_def(db, rule_dict)
     await signals_repo.insert_audit(

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Optional
+import secrets
 
-from fastapi import Depends, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from .db import Database
 from .settings import Settings, get_settings
@@ -16,6 +17,16 @@ async def get_db(request: Request) -> Database:
 
 def get_app_settings() -> Settings:
     return get_settings()
+
+
+def require_admin_token(
+    token: Annotated[Optional[str], Header(alias="x-api-key")] = None,
+    settings: Settings = Depends(get_app_settings),
+):
+    expected = settings.admin_api_token
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="invalid token")
+    return token
 
 
 @asynccontextmanager

@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.db import Database
-from backend.deps import get_app_settings, get_db
+from backend.deps import get_app_settings, get_db, require_admin_token
 from backend.execution import oems
 from backend.execution.executor import Executor
 from backend.repo import markets_repo, signals_repo, ticks_repo
@@ -44,11 +44,8 @@ async def create_intent(
     payload: IntentRequest,
     db: Database = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
-    token: Optional[str] = Header(default=None, alias="x-api-key"),
+    _: str = Depends(require_admin_token),
 ):
-    # 简单的 admin token 校验
-    if settings.admin_api_token and token != settings.admin_api_token:
-        raise HTTPException(status_code=401, detail="invalid token")
     request_payload = payload
     signal = await _signal_payload(db, request_payload.signal_id)
     # 信号时效校验，默认 60s 内有效
@@ -130,10 +127,8 @@ async def confirm_intent(
     intent_id: int,
     db: Database = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
-    token: Optional[str] = Header(default=None, alias="x-api-key"),
+    _: str = Depends(require_admin_token),
 ):
-    if settings.admin_api_token and token != settings.admin_api_token:
-        raise HTTPException(status_code=401, detail="invalid token")
     intents = await oems.list_intents(db)
     target = next((intent for intent in intents if intent["intent_id"] == intent_id), None)
     if not target:
@@ -154,10 +149,8 @@ class IntentListResponse(BaseModel):
 async def list_intents(
     status: Optional[str] = Query(default=None),
     db: Database = Depends(get_db),
-    token: Optional[str] = Header(default=None, alias="x-api-key"),
     settings: Settings = Depends(get_app_settings),
+    _: str = Depends(require_admin_token),
 ):
-    if settings.admin_api_token and token != settings.admin_api_token:
-        raise HTTPException(status_code=401, detail="invalid token")
     intents = await oems.list_intents(db, status=status)
     return IntentListResponse(items=intents)
