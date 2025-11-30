@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -9,6 +10,13 @@ from fastapi.testclient import TestClient
 
 from backend.api import health, kpi, markets, signals
 from backend.deps import get_db
+
+os.environ.setdefault("POSTGRES_HOST", "localhost")
+os.environ.setdefault("POSTGRES_PORT", "5432")
+os.environ.setdefault("POSTGRES_DB", "test_db")
+os.environ.setdefault("POSTGRES_USER", "test_user")
+os.environ.setdefault("POSTGRES_PASSWORD", "test_strong_password")
+os.environ.setdefault("ADMIN_API_TOKEN", "test_admin_token_123")
 
 
 class FakeDB:

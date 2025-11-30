@@ -5,4 +5,5 @@ frontend/node_modules
 .cache
 coverage-html
 .coverage
+.csv
 vendor/
