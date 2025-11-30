@@ -91,11 +91,22 @@ def build_features(ticks: pd.DataFrame) -> pd.DataFrame:
     ticks["price_velocity_10s"] = (
         ticks.groupby("market_id")["mid_price"].transform(lambda s: s.diff().fillna(0))
     )
-    ticks.set_index("ts", inplace=True)
+    def _vol_rolling(group: pd.DataFrame) -> pd.Series:
+        group = group.sort_values("ts")
+        series = (
+            group.set_index("ts")["mid_price"]
+            .rolling("5min")
+            .std()
+            .reset_index(drop=True)
+        )
+        series.index = group.index
+        return series
+
     ticks["volatility_5m"] = (
-        ticks.groupby("market_id")["mid_price"].rolling("5min").std().fillna(0).reset_index(level=0, drop=True)
+        ticks.groupby("market_id", group_keys=False)
+        .apply(_vol_rolling)
+        .fillna(0)
     )
-    ticks.reset_index(inplace=True)
     ticks["time_to_expiry_minutes"] = (
         (ticks["ends_at"] - ticks["ts"]).dt.total_seconds().div(60).clip(lower=0).fillna(0)
     )
@@ -132,7 +143,7 @@ def align_labels(features: pd.DataFrame, signals: pd.DataFrame) -> pd.DataFrame:
     if not signals.empty:
         signals = signals.copy()
         signals["created_at"] = pd.to_datetime(signals["created_at"], utc=True)
-        signals = signals.set_index("created_at")
+        signals = signals.set_index("created_at").sort_index()
         for idx, row in features.iterrows():
             window_start = row["feature_ts"] - pd.Timedelta(seconds=5)
             window_end = row["feature_ts"] + pd.Timedelta(seconds=5)

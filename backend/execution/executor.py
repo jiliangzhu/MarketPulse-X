@@ -13,6 +13,7 @@ class ExecutionContext:
     limit_price: float
     side: str
     market_id: str
+    option_id: str | None
     policy_id: int
 
 
@@ -32,9 +33,14 @@ class Executor:
         )
         if not limit_result.ok:
             reasons.extend(limit_result.reasons)
+        option_id = ctx.option_id
+        if not option_id:
+            reasons.append("missing option for guardrail")
+            return False, reasons
         guardrail_result = await guardrails.evaluate_guardrails(
             self.db,
             ctx.market_id,
+            option_id=option_id,
             side=ctx.side,
             limit_price=ctx.limit_price,
             slippage_bps=self.settings.exec_slippage_bps,
@@ -49,6 +55,7 @@ class Executor:
             limit_price=float(intent.get("limit_price") or 0),
             side=intent["side"],
             market_id=intent["market_id"],
+            option_id=intent.get("option_id") or (intent.get("detail_json") or {}).get("primary_option_id"),
             policy_id=intent.get("policy_id"),
         )
         ok, reasons = await self.validate(ctx)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, getcontext
 from typing import List
 
 from backend.repo import execution_repo
@@ -19,8 +20,14 @@ async def evaluate_limits(
     limit_price: float,
     settings,
 ) -> LimitResult:
+    getcontext().prec = 18
     reasons: list[str] = []
-    notional = qty * limit_price
+    notional = float(Decimal(str(qty)) * Decimal(str(limit_price)))
+    # 简易串行化：使用 advisory lock 防止并发穿透
+    try:
+        await db.execute("SELECT pg_advisory_xact_lock(42);")
+    except Exception:
+        pass
     if notional > settings.exec_max_notional_per_order:
         reasons.append("per-order notional exceeded")
     open_orders = await execution_repo.open_intents_count(db)

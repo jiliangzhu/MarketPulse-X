@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Optional
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from pydantic import BaseModel
 
 from backend.db import Database
@@ -43,9 +44,19 @@ async def create_intent(
     payload: IntentRequest,
     db: Database = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
+    token: Optional[str] = Header(default=None, alias="x-api-key"),
 ):
+    # 简单的 admin token 校验
+    if settings.admin_api_token and token != settings.admin_api_token:
+        raise HTTPException(status_code=401, detail="invalid token")
     request_payload = payload
     signal = await _signal_payload(db, request_payload.signal_id)
+    # 信号时效校验，默认 60s 内有效
+    created_at = signal.get("created_at")
+    if created_at:
+        age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if age_seconds > 60:
+            raise HTTPException(status_code=400, detail="signal expired")
     if signal.get("level") not in {"P1", "P2"}:
         raise HTTPException(status_code=400, detail="signal level too low")
     market_id = signal["market_id"]
@@ -87,6 +98,7 @@ async def create_intent(
         "estimated_edge_bps": signal_payload.get("estimated_edge_bps"),
         "payload": signal_payload,
         "trade_plan_hint": trade_plan_hint or None,
+        "primary_option_id": primary_leg.get("option_id") if primary_leg else None,
     }
     intent = await oems.create_suggested_intent(
         db,
@@ -96,6 +108,7 @@ async def create_intent(
             "side": side,
             "qty": qty,
             "limit_price": limit_price,
+            "option_id": primary_leg.get("option_id") if primary_leg else None,
             "ttl_secs": request_payload.ttl_secs,
             "status": "suggested",
             "policy_id": policy_id,
