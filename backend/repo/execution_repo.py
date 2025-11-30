@@ -30,15 +30,14 @@ async def get_policy(db: Database) -> Optional[dict[str, Any]]:
     return dict(row) if row else None
 
 
-async def create_intent(db: Database, payload: dict[str, Any]) -> dict[str, Any]:
+async def create_intent(db: Database, payload: dict[str, Any], conn=None) -> dict[str, Any]:
     query = """
         INSERT INTO order_intent (signal_id, market_id, side, qty, limit_price, ttl_secs, status, policy_id, detail_json)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         RETURNING intent_id, created_at, status
     """
     detail = json.dumps(payload.get("detail_json", {}))
-    row = await db.fetchrow(
-        query,
+    args = (
         payload.get("signal_id"),
         payload.get("market_id"),
         payload.get("side"),
@@ -49,21 +48,24 @@ async def create_intent(db: Database, payload: dict[str, Any]) -> dict[str, Any]
         payload.get("policy_id"),
         detail,
     )
+    if conn:
+        row = await conn.fetchrow(query, *args)
+    else:
+        row = await db.fetchrow(query, *args)
     return {**payload, "intent_id": row["intent_id"], "created_at": row["created_at"], "status": row["status"]}
 
 
-async def update_intent_status(db: Database, intent_id: int, status: str, detail_json: dict[str, Any] | None = None) -> None:
+async def update_intent_status(db: Database, intent_id: int, status: str, detail_json: dict[str, Any] | None = None, conn=None) -> None:
     detail_payload = json.dumps(detail_json) if detail_json is not None else None
-    await db.execute(
-        """
+    query = """
         UPDATE order_intent
         SET status = $2, detail_json = COALESCE($3, detail_json), updated_at = now()
         WHERE intent_id = $1
-        """,
-        intent_id,
-        status,
-        detail_payload,
-    )
+        """
+    if conn:
+        await conn.execute(query, intent_id, status, detail_payload)
+    else:
+        await db.execute(query, intent_id, status, detail_payload)
 
 
 async def fetch_intents(db: Database, *, status: Optional[str] = None, limit: int = 50) -> List[dict[str, Any]]:
@@ -88,21 +90,24 @@ async def fetch_intents(db: Database, *, status: Optional[str] = None, limit: in
     return result
 
 
-async def daily_notional(db: Database, *, day_value: Optional[date] = None) -> float:
+async def daily_notional(db: Database, *, day_value: Optional[date] = None, conn=None) -> float:
     day_value = day_value or datetime.now(timezone.utc).date()
-    row = await db.fetchrow(
-        """
+    query = """
         SELECT COALESCE(sum(qty * COALESCE(limit_price,0)), 0) AS notional
         FROM order_intent
         WHERE DATE(created_at) = $1 AND status IN ('sent','filled')
-        """,
-        day_value,
-    )
+        """
+    if conn:
+        row = await conn.fetchrow(query, day_value)
+    else:
+        row = await db.fetchrow(query, day_value)
     return float(row["notional"]) if row else 0.0
 
 
-async def open_intents_count(db: Database) -> int:
-    row = await db.fetchrow(
-        "SELECT COUNT(1) AS c FROM order_intent WHERE status IN ('suggested','confirmed','sent')"
-    )
+async def open_intents_count(db: Database, conn=None) -> int:
+    query = "SELECT COUNT(1) AS c FROM order_intent WHERE status IN ('suggested','confirmed','sent')"
+    if conn:
+        row = await conn.fetchrow(query)
+    else:
+        row = await db.fetchrow(query)
     return int(row["c"]) if row else 0

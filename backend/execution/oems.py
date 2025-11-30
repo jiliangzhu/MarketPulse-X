@@ -24,14 +24,14 @@ async def bootstrap_policy(db: Database, settings) -> int:
     return policy_id
 
 
-async def create_suggested_intent(db: Database, payload: dict[str, Any]) -> dict[str, Any]:
-    order = await execution_repo.create_intent(db, payload)
+async def create_suggested_intent(db: Database, payload: dict[str, Any], conn=None) -> dict[str, Any]:
+    order = await execution_repo.create_intent(db, payload, conn=conn)
     order_intent_counter.labels(status=payload.get("status", "suggested")).inc()
     return order
 
 
-async def mark_status(db: Database, intent_id: int, status: str, detail_json: dict[str, Any] | None = None) -> None:
-    await execution_repo.update_intent_status(db, intent_id, status, detail_json)
+async def mark_status(db: Database, intent_id: int, status: str, detail_json: dict[str, Any] | None = None, conn=None) -> None:
+    await execution_repo.update_intent_status(db, intent_id, status, detail_json, conn=conn)
     order_intent_counter.labels(status=status).inc()
 
 

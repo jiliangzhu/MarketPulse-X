@@ -63,14 +63,19 @@ async def create_intent(
     latest = await ticks_repo.latest_ticks_by_market(db, market_id)
     if not latest:
         raise HTTPException(status_code=400, detail="market has no liquidity")
-    top_tick = max(latest.values(), key=lambda x: x.get("price") or 0)
     rule_type = (signal.get("payload_json") or {}).get("rule_type")
     signal_payload = signal.get("payload_json") or {}
     trade_plan_hint = signal_payload.get("suggested_trade") or {}
     legs_hint = trade_plan_hint.get("legs") or []
     primary_leg = legs_hint[0] if legs_hint else None
+    if not primary_leg or not primary_leg.get("option_id"):
+        raise HTTPException(status_code=400, detail="missing primary option")
+    opt_id = primary_leg.get("option_id")
+    opt_tick = latest.get(opt_id)
+    if not opt_tick:
+        raise HTTPException(status_code=400, detail="option has no liquidity")
     qty = request_payload.qty_override or (float(primary_leg.get("qty") or 1) if primary_leg else 1)
-    ref_price = float(top_tick.get("price") or 0.5)
+    ref_price = float(opt_tick.get("price") or 0.5)
     inferred_leg_price = None
     if primary_leg:
         inferred_leg_price = float(primary_leg.get("limit_price") or primary_leg.get("reference_price") or ref_price)
@@ -78,6 +83,10 @@ async def create_intent(
     side = request_payload.side or (primary_leg.get("side") if primary_leg else ("buy" if signal.get("level") == "P1" else "sell"))
     # 根据风控滑点对价格做预夹
     allowed_slip = ref_price * (settings.exec_slippage_bps / 10000)
+    # 现价偏离信号价（若提供）检查
+    signal_price = _to_float(signal_payload.get("price") or primary_leg.get("reference_price") or ref_price)
+    if abs(ref_price - signal_price) > allowed_slip * 2:
+        raise HTTPException(status_code=400, detail="price drift too wide")
     if rule_type == "ENDGAME_SWEEP":
         qty = request_payload.qty_override or 1
         limit_price = request_payload.limit_price_override or min(0.99, ref_price)
@@ -100,21 +109,19 @@ async def create_intent(
         "trade_plan_hint": trade_plan_hint or None,
         "primary_option_id": primary_leg.get("option_id") if primary_leg else None,
     }
-    intent = await oems.create_suggested_intent(
-        db,
-        {
-            "signal_id": request_payload.signal_id,
-            "market_id": market_id,
-            "side": side,
-            "qty": qty,
-            "limit_price": limit_price,
-            "option_id": primary_leg.get("option_id") if primary_leg else None,
-            "ttl_secs": request_payload.ttl_secs,
-            "status": "suggested",
-            "policy_id": policy_id,
-            "detail_json": detail_json,
-        },
-    )
+    intent_payload = {
+        "signal_id": request_payload.signal_id,
+        "market_id": market_id,
+        "side": side,
+        "qty": qty,
+        "limit_price": limit_price,
+        "option_id": opt_id,
+        "ttl_secs": request_payload.ttl_secs,
+        "status": "suggested",
+        "policy_id": policy_id,
+        "detail_json": detail_json,
+    }
+    intent = await oems.create_suggested_intent(db, intent_payload)
     return IntentConfirmResponse(intent_id=intent["intent_id"], status=intent["status"], detail_json=detail_json)
 
 
@@ -123,14 +130,19 @@ async def confirm_intent(
     intent_id: int,
     db: Database = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
+    token: Optional[str] = Header(default=None, alias="x-api-key"),
 ):
+    if settings.admin_api_token and token != settings.admin_api_token:
+        raise HTTPException(status_code=401, detail="invalid token")
     intents = await oems.list_intents(db)
     target = next((intent for intent in intents if intent["intent_id"] == intent_id), None)
     if not target:
         raise HTTPException(status_code=404, detail="intent not found")
     executor = Executor(db, settings)
-    result = await executor.confirm_and_execute(target)
-    await oems.mark_status(db, intent_id, result["status"], result.get("detail_json"))
+    async with db.connection() as conn:
+        async with conn.transaction():
+            result = await executor.confirm_and_execute(target)
+            await oems.mark_status(db, intent_id, result["status"], result.get("detail_json"), conn=conn)
     return IntentConfirmResponse(intent_id=intent_id, status=result["status"], detail_json=result.get("detail_json"))
 
 
@@ -142,6 +154,10 @@ class IntentListResponse(BaseModel):
 async def list_intents(
     status: Optional[str] = Query(default=None),
     db: Database = Depends(get_db),
+    token: Optional[str] = Header(default=None, alias="x-api-key"),
+    settings: Settings = Depends(get_app_settings),
 ):
+    if settings.admin_api_token and token != settings.admin_api_token:
+        raise HTTPException(status_code=401, detail="invalid token")
     intents = await oems.list_intents(db, status=status)
     return IntentListResponse(items=intents)

@@ -23,13 +23,14 @@ class Executor:
         self.settings = settings
         self.logger = get_logger("executor")
 
-    async def validate(self, ctx: ExecutionContext) -> tuple[bool, list[str]]:
+    async def validate(self, ctx: ExecutionContext, conn=None) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         limit_result = await limits.evaluate_limits(
             self.db,
             qty=ctx.qty,
             limit_price=ctx.limit_price,
             settings=self.settings,
+            conn=conn,
         )
         if not limit_result.ok:
             reasons.extend(limit_result.reasons)
@@ -58,7 +59,9 @@ class Executor:
             option_id=intent.get("option_id") or (intent.get("detail_json") or {}).get("primary_option_id"),
             policy_id=intent.get("policy_id"),
         )
-        ok, reasons = await self.validate(ctx)
+        async with self.db.connection() as conn:
+            async with conn.transaction():
+                ok, reasons = await self.validate(ctx, conn=conn)
         detail = intent.get("detail_json", {})
         detail.setdefault("checks", {})
         detail["checks"].update({"reasons": reasons, "approved": ok})
