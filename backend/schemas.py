@@ -51,5 +51,5 @@ class SignalSchema(BaseModel):
 
 
 class RuleUploadSchema(BaseModel):
-    name: str
-    dsl: str
+    name: str = Field(max_length=128)
+    dsl: str = Field(max_length=8000)
