@@ -3,8 +3,8 @@ type: "CRYPTO_LEAD_LAG"
 enabled: true
 scope: {}
 params:
-  return_threshold: 0.003
-  poly_drift_threshold: 0.002
+  return_threshold: 0.002
+  poly_drift_threshold: 0.003
   spread_limit: 0.05
   min_liquidity: 500
 outputs:

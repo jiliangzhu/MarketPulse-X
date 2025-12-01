@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from backend.db import Database
 from backend.processing.rules_engine import RulesEngine, Rule
+from backend.ingestion.source_binance import BinancePriceCache
 from backend.repo import markets_repo
 from backend.settings import get_settings
 from backend.utils.logging import configure_logging, get_logger
@@ -149,35 +150,60 @@ async def run_backtest(args: argparse.Namespace) -> None:
     engine.rules = [rule for rule in engine.rules if rule.type == args.rule]
     if not engine.rules:
         raise ValueError(f"Rule {args.rule} not found")
+    # 启动 Binance 缓存，便于回放 lead-lag 策略
+    try:
+        BinancePriceCache.get_instance().ensure_running()
+    except RuntimeError:
+        logger.warning("binance-cache-skip", extra={"reason": "no-loop"})
     start = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
     end = datetime.fromisoformat(args.end.replace("Z", "+00:00"))
-    rows = await db.fetch(
-        """
-        SELECT ts, market_id, option_id, price, volume, best_bid, best_ask, liquidity
-        FROM tick
-        WHERE ts BETWEEN $1 AND $2
-        ORDER BY ts
-        """,
-        start,
-        end,
-    )
     markets = await markets_repo.list_markets(db, status=None, limit=500)
     market_map = {m["market_id"]: m for m in markets}
     option_cache: Dict[str, List[dict]] = {}
     state: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"latest": {}, "recent": deque(maxlen=300)})
     portfolio = Portfolio(args.initial_cash)
+    cooldown: Dict[Tuple[int, str], datetime] = {}
     quotes: Dict[Tuple[str, str], dict[str, Any]] = {}
     last_ts: datetime | None = None
-    for row in rows:
-        market_id = row["market_id"]
-        if market_id not in option_cache:
-            option_cache[market_id] = await markets_repo.list_options(db, market_id)
-        market_state = state[market_id]
-        market_state["latest"][row["option_id"]] = dict(row)
-        recent: Deque[dict[str, Any]] = market_state["recent"]
-        recent.appendleft(dict(row))
-        quotes[(market_id, row["option_id"])] = dict(row)
+    # 分片拉取 ticks，避免一次性加载过大
+    cur_start = start
+    step = timedelta(hours=12)
+    while cur_start < end:
+        cur_end = min(cur_start + step, end)
+        rows = await db.fetch(
+            """
+            SELECT ts, market_id, option_id, price, volume, best_bid, best_ask, liquidity
+            FROM tick
+            WHERE ts BETWEEN $1 AND $2
+            ORDER BY ts
+            """,
+            cur_start,
+            cur_end,
+        )
+        cur_start = cur_end
+        if not rows:
+            continue
+        for row in rows:
+            market_id = row["market_id"]
+            if market_id not in option_cache:
+                option_cache[market_id] = await markets_repo.list_options(db, market_id)
+            market_state = state[market_id]
+            market_state["latest"][row["option_id"]] = dict(row)
+            recent: Deque[dict[str, Any]] = market_state["recent"]
+            recent.appendleft(dict(row))
+            quotes[(market_id, row["option_id"])] = dict(row)
+            engine._latest_snapshots[market_id] = {
+                "market": market_map.get(market_id, {"market_id": market_id, "title": market_id}),
+            "ticks": market_state["latest"],
+            "options": option_cache[market_id],
+            "synonym_peers": [],
+        }
         for rule in engine.rules:
+            cd_key = (rule.rule_id, market_id)
+            cd_secs = rule.config.get("dedupe", {}).get("cooldown_secs", 0)
+            if cd_secs and cd_key in cooldown:
+                if (row["ts"] - cooldown[cd_key]).total_seconds() < cd_secs:
+                    continue
             payload = await engine._evaluate_rule(
                 rule,
                 market_map.get(market_id, {"market_id": market_id, "title": market_id, "status": "active"}),
@@ -186,16 +212,24 @@ async def run_backtest(args: argparse.Namespace) -> None:
                 option_cache[market_id],
             )
             if payload:
+                legs = (payload.get("payload") or {}).get("suggested_trade", {}).get("legs") or []
+                side = infer_side(rule, payload, legs)
+                tick_override = dict(row)
+                if legs and legs[0].get("price") is not None:
+                    leg_price = legs[0]["price"]
+                    tick_override["best_bid"] = leg_price
+                    tick_override["best_ask"] = leg_price
                 signal = {
                     "ts": row["ts"],
                     "market_id": market_id,
                     "option_id": payload.get("option_id"),
                     "payload": payload,
                     "rule": rule,
-                    "side": infer_side(rule, payload),
+                    "side": side,
                     "qty": payload.get("qty", 1.0),
-                    "tick": dict(row),
+                    "tick": tick_override,
                 }
+                cooldown[cd_key] = row["ts"]
                 portfolio.execute_signal(signal)
                 logger.info(
                     "backtest-signal",
@@ -216,7 +250,11 @@ async def run_backtest(args: argparse.Namespace) -> None:
     await db.disconnect()
 
 
-def infer_side(rule: Rule, payload: dict[str, Any]) -> str:
+def infer_side(rule: Rule, payload: dict[str, Any], legs: list[dict[str, Any]] | None = None) -> str:
+    if legs:
+        side = legs[0].get("side")
+        if side:
+            return side.lower()
     if payload.get("direction"):
         return payload["direction"].lower()
     rule_type = rule.type

@@ -32,7 +32,10 @@ class BinancePriceCache:
         "ethusdt": "ETH",
         "solusdt": "SOL",
     }
-    WS_URI: ClassVar[str] = "wss://stream.binance.us:9443/ws"
+    WS_URIS: ClassVar[list[str]] = [
+        "wss://stream.binance.us:9443/stream?streams=btcusdt@trade/ethusdt@trade/solusdt@trade",
+        "wss://stream.binance.us:9443/ws",
+    ]
     _instance: ClassVar[Optional["BinancePriceCache"]] = None
 
     def __init__(self) -> None:
@@ -64,32 +67,37 @@ class BinancePriceCache:
                 self.logger.warning("binance-feed-disabled", extra={"reason": "websockets-missing"})
                 await asyncio.sleep(5)
                 continue
-            try:
-                self.logger.info("binance-feed-connecting", extra={"uri": self.WS_URI})
-                async with websockets.connect(
-                    self.WS_URI,
-                    ping_interval=20,
-                    ping_timeout=20,
-                ) as ws:
-                    await ws.send(subscribe_payload)
-                    self.logger.info("binance-feed-subscribed", extra={"uri": self.WS_URI})
-                    async for raw_msg in ws:
-                        await self._handle_message(raw_msg)
-            except Exception as exc:  # pragma: no cover - 网络异常兜底
-                self.logger.warning("binance-feed-retry", extra={"error": repr(exc), "uri": self.WS_URI})
-                await asyncio.sleep(1)
+            for uri in self.WS_URIS:
+                try:
+                    self.logger.info("binance-feed-connecting", extra={"uri": uri})
+                    async with websockets.connect(
+                        uri,
+                        ping_interval=20,
+                        ping_timeout=20,
+                    ) as ws:
+                        if "stream?" not in uri:
+                            await ws.send(subscribe_payload)
+                        self.logger.info("binance-feed-subscribed", extra={"uri": uri})
+                        async for raw_msg in ws:
+                            await self._handle_message(raw_msg)
+                except Exception as exc:  # pragma: no cover - 网络异常兜底
+                    self.logger.warning("binance-feed-retry", extra={"error": repr(exc), "uri": uri})
+                    await asyncio.sleep(1)
+                    continue
+            await asyncio.sleep(1)
 
     async def _handle_message(self, raw_msg: str) -> None:
         try:
             payload = json.loads(raw_msg)
-            if payload.get("e") != "trade":
+            data = payload["data"] if isinstance(payload, dict) and "data" in payload else payload
+            if data.get("e") != "trade":
                 return
-            stream_symbol = payload.get("s", "").lower()
+            stream_symbol = data.get("s", "").lower()
             asset = self.STREAMS.get(stream_symbol)
             if not asset:
                 return
-            price = float(payload.get("p", 0.0))
-            ts_ms = payload.get("T") or int(time.time() * 1000)
+            price = float(data.get("p", 0.0))
+            ts_ms = data.get("T") or int(time.time() * 1000)
             ts = ts_ms / 1000
         except Exception as exc:  # pragma: no cover - 解包异常
             self.logger.error("binance-feed-parse", extra={"error": str(exc)})
